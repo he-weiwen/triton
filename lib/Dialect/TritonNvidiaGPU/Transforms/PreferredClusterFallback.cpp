@@ -92,6 +92,10 @@ public:
               ttng::AsyncTMAScatterOp>(op))
         return unsupported();
 
+      if (isa<ttng::ClusterArriveOp, ttng::ClusterWaitOp,
+              ttng::ClusterBarrierOp>(op))
+        return unsupported();
+
       if (auto barrierOp = dyn_cast<ttg::MBarrierOpInterface>(op)) {
         for (Value barrier : barrierOp.getBarriers()) {
           auto barrierTy = cast<ttg::MemDescType>(barrier.getType());
