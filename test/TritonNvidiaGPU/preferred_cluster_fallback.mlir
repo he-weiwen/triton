@@ -53,6 +53,32 @@ module attributes {"ttg.num-ctas" = 4 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 
 // -----
 
+module attributes {"ttg.num-ctas" = 4 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:100", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-NOT: ttng.preferred-cluster-fallback-ctas
+  // CHECK-LABEL: tt.func @reject_atomic_rmw
+  tt.func @reject_atomic_rmw(%arg0: !tt.ptr<f32>) {
+    %true = arith.constant true
+    %cst = arith.constant 1.000000e+00 : f32
+    %0 = tt.atomic_rmw fadd, relaxed, gpu, %arg0, %cst, %true : (!tt.ptr<f32>, f32, i1) -> f32
+    tt.return
+  }
+}
+
+// -----
+
+module attributes {"ttg.num-ctas" = 4 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:100", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-NOT: ttng.preferred-cluster-fallback-ctas
+  // CHECK-LABEL: tt.func @reject_atomic_cas
+  tt.func @reject_atomic_cas(%arg0: !tt.ptr<i32>) {
+    %c0 = arith.constant 0 : i32
+    %c1 = arith.constant 1 : i32
+    %0 = tt.atomic_cas relaxed, gpu, %arg0, %c0, %c1 : (!tt.ptr<i32>, i32, i32) -> i32
+    tt.return
+  }
+}
+
+// -----
+
 module attributes {"ttg.num-ctas" = 4 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:100", "ttg.threads-per-warp" = 32 : i32, "ttg.instrumentation_mode" = "consan"} {
   // CHECK-NOT: ttng.preferred-cluster-fallback-ctas
   // CHECK-LABEL: tt.func @reject_consan_marked_module

@@ -76,6 +76,9 @@ public:
       if (isa<triton::ElementwiseInlineAsmOp>(op))
         return unsupported();
 
+      if (isa<triton::AtomicRMWOp, triton::AtomicCASOp>(op))
+        return unsupported();
+
       if (auto cvt = dyn_cast<ttg::ConvertLayoutOp>(op)) {
         if (hasCrossCTAConvertLayout(cvt))
           return unsupported();
