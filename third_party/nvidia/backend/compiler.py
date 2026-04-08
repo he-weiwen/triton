@@ -372,7 +372,7 @@ class CUDABackend(BaseBackend):
         nvidia.passes.ttgpuir.add_allocate_shared_memory_nv(pm, capability, ptx_version)
         nvidia.passes.ttnvgpuir.add_allocate_tensor_memory(pm)
         nvidia.passes.ttnvgpuir.add_check_matmul_two_cta(pm)
-        if "consan" not in options.instrumentation_mode:
+        if "consan" not in options.instrumentation_mode and not options.launch_cooperative_grid:
             nvidia.passes.ttnvgpuir.add_preferred_cluster_fallback(pm, capability)
         # instrumentation point here so we can override IRs above (e.g., ttir and ttgir)
         if CUDABackend.instrumentation:
