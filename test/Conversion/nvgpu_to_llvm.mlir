@@ -1,15 +1,29 @@
 // RUN: triton-opt %s --convert-nv-gpu-to-llvm -allow-unregistered-dialect -split-input-file | FileCheck %s
 
 // CHECK-LABEL: @cluster_id
-llvm.func @cluster_id() -> i32 {
-  // CHECK: nvvm.read.ptx.sreg.cluster.ctarank
-  // CHECK-NOT: nvvm.read.ptx.sreg.cluster.ctaid.x
-  // CHECK-NOT: nvvm.read.ptx.sreg.cluster.ctaid.y
-  // CHECK-NOT: nvvm.read.ptx.sreg.cluster.ctaid.z
-  // CHECK-NOT: nvvm.read.ptx.sreg.cluster.nctaid.x
-  // CHECK-NOT: nvvm.read.ptx.sreg.cluster.nctaid.y
-  %id = nvg.cluster_id
-  llvm.return %id : i32
+module attributes {"ttg.num-ctas" = 2 : i32} {
+  llvm.func @cluster_id() -> i32 {
+    // CHECK: nvvm.read.ptx.sreg.cluster.ctarank
+    // CHECK-NOT: nvvm.read.ptx.sreg.cluster.ctaid.x
+    // CHECK-NOT: nvvm.read.ptx.sreg.cluster.ctaid.y
+    // CHECK-NOT: nvvm.read.ptx.sreg.cluster.ctaid.z
+    // CHECK-NOT: nvvm.read.ptx.sreg.cluster.nctaid.x
+    // CHECK-NOT: nvvm.read.ptx.sreg.cluster.nctaid.y
+    %id = nvg.cluster_id
+    llvm.return %id : i32
+  }
+}
+
+// CHECK-LABEL: @cluster_id_preferred_fallback
+module attributes {"ttg.num-ctas" = 8 : i32, "ttng.preferred-cluster-fallback-ctas" = 2 : i32} {
+  llvm.func @cluster_id_preferred_fallback() -> i32 {
+    // CHECK: %[[NUM_CTAS:.+]] = llvm.mlir.constant(8 : i32)
+    // CHECK: %[[CTAID:.+]] = nvvm.read.ptx.sreg.ctaid.x
+    // CHECK: %[[CLUSTER_ID:.+]] = llvm.urem %[[CTAID]], %[[NUM_CTAS]] : i32
+    // CHECK: llvm.return %[[CLUSTER_ID]] : i32
+    %id = nvg.cluster_id
+    llvm.return %id : i32
+  }
 }
 
 // -----

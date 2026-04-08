@@ -574,6 +574,7 @@ def matmul_with_config(
     cga_layout,
     epilogue_size_n,
     subtile_stages,
+    return_compiled=False,
 ):
     if block_size_n // get_split_dim(cga_layout, 1) > 256:
         raise ValueError(
@@ -620,7 +621,7 @@ def matmul_with_config(
         num_tiles = triton.cdiv(M, tile_m) * triton.cdiv(N, tile_n)
         return (num_tiles, )
 
-    _matmul_kernel[grid](
+    compiled = _matmul_kernel[grid](
         a_desc,
         b_desc,
         c_desc,
@@ -640,7 +641,7 @@ def matmul_with_config(
         num_warps=4,
         num_ctas=2**len(cga_layout),
     )
-    return c
+    return (c, compiled) if return_compiled else c
 
 
 def matmul(a, b):
@@ -721,6 +722,42 @@ def test_matmul_matches_torch(
     except triton.OutOfResources:
         pytest.skip("Out of resources")
     torch.testing.assert_close(expected, actual, atol=1e-1, rtol=1e-2)
+
+
+@pytest.mark.skipif(not is_blackwell(), reason="Requires Blackwell")
+@pytest.mark.parametrize("cga_layout", [
+    ((1, 0), ),
+    ((1, 0), (2, 0)),
+    ((1, 0), (2, 0), (4, 0)),
+    ((1, 0), (2, 0), (4, 0), (8, 0)),
+])
+def test_matmul_warp_specialized_clc(cga_layout):
+    torch.manual_seed(0)
+    M, N, K = 100, 200, 200
+    a = torch.rand((M, K), device=torch.device("cuda"), dtype=torch.float16)
+    b = torch.rand((K, N), device=torch.device("cuda"), dtype=torch.float16)
+
+    actual, compiled = matmul_with_config(
+        a,
+        b,
+        block_size_m=64,
+        block_size_n=128,
+        block_size_k=64,
+        grid_minor_dim=0,
+        grid_tile_width=8,
+        stages=2,
+        acc_stages=2,
+        cga_layout=cga_layout,
+        epilogue_size_n=get_epilogue_size_n(64, 128, cga_layout),
+        subtile_stages=4,
+        return_compiled=True,
+    )
+
+    expected_fallback = 2 if len(cga_layout) > 1 else 0
+    assert compiled.metadata.preferred_cluster_fallback_ctas == expected_fallback
+    assert "clusterlaunchcontrol" in compiled.asm["ptx"]
+    assert (".reqnctapercluster" in compiled.asm["ptx"]) == (expected_fallback == 0)
+    torch.testing.assert_close(torch.matmul(a, b), actual, atol=1e-1, rtol=1e-2)
 
 
 ########################################################

@@ -58,6 +58,8 @@ LogicalResult verifyMMAv5Op(Operation *op);
 namespace mlir::triton::nvidia_gpu {
 
 constexpr static char AttrTwoCTAsName[] = "ttng.two-ctas";
+constexpr static char AttrPreferredClusterFallbackCTAsName[] =
+    "ttng.preferred-cluster-fallback-ctas";
 
 inline bool getModuleTwoCTAs(ModuleOp mod) {
   auto attr = mod->getAttrOfType<BoolAttr>(AttrTwoCTAsName);
@@ -66,6 +68,16 @@ inline bool getModuleTwoCTAs(ModuleOp mod) {
 
 inline bool getModuleTwoCTAs(Operation *op) {
   return getModuleTwoCTAs(op->getParentOfType<ModuleOp>());
+}
+
+inline int getModulePreferredClusterFallbackCTAs(ModuleOp mod) {
+  auto attr =
+      mod->getAttrOfType<IntegerAttr>(AttrPreferredClusterFallbackCTAsName);
+  return attr ? attr.getInt() : 0;
+}
+
+inline int getModulePreferredClusterFallbackCTAs(Operation *op) {
+  return getModulePreferredClusterFallbackCTAs(op->getParentOfType<ModuleOp>());
 }
 
 struct TensorMemory : public SideEffects::Resource::Base<TensorMemory> {

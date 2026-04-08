@@ -1192,7 +1192,7 @@ struct AsyncTMACopyGlobalToLocalOpConversion
     auto kBlock = str_attr("block");
     const auto numCopies = msgToOffset.getInDimSize(kMsg);
     auto zero = b.i32_val(0);
-    auto ctaId = nvgpu::ClusterCTAIdOp::create(rewriter, loc);
+    Value ctaId = triton::nvgpu::ClusterCTAIdOp::create(rewriter, loc);
     // We multicast if the flag is on and the block layout has broadcasting
     bool multicast = op.getMulticast();
     Value multicastMask;
@@ -1204,7 +1204,8 @@ struct AsyncTMACopyGlobalToLocalOpConversion
           LLVM::NVIDIA::createTMAMulticastMask(loc, rewriter, maskCGABroadcast);
       // If we multicast, we emit the full message from the representative CTA
       // meaning the CTA with the lowest CTA id in a multicast group.
-      auto ctaIdInGroup = b.and_(ctaId, b.i32_val(maskCGABroadcast));
+      Value physicalCtaId = NVVM::ClusterId::create(rewriter, loc, i32_ty);
+      Value ctaIdInGroup = b.and_(physicalCtaId, b.i32_val(maskCGABroadcast));
       pred = b.and_(pred, b.icmp_eq(ctaIdInGroup, b.i32_val(0)));
     }
 
@@ -1343,7 +1344,7 @@ LogicalResult convertTMAStoreLikeOp(Operation *op,
   auto kBlock = str_attr("block");
   auto numCopies = msgToOffset.getInDimSize(kMsg);
   auto zero = b.i32_val(0);
-  auto ctaId = nvgpu::ClusterCTAIdOp::create(rewriter, loc);
+  Value ctaId = triton::nvgpu::ClusterCTAIdOp::create(rewriter, loc);
 
   for (int copyIdx = 0; copyIdx < numCopies; copyIdx += numWarps) {
     int numWarpsToCopy = std::min(numCopies - copyIdx, numWarps);
@@ -1544,7 +1545,7 @@ static LogicalResult iterateGatherScatterIndices(
     return op->emitError("x offsets must be broadcasted across each warp");
 
   Value warpId = mlir::triton::gpu::WarpIdOp::create(rewriter, loc);
-  Value blockId = nvgpu::ClusterCTAIdOp::create(rewriter, loc);
+  Value blockId = triton::nvgpu::ClusterCTAIdOp::create(rewriter, loc);
 
   // Mask out warps with redundant x offsets.
   pred = b.and_(pred,

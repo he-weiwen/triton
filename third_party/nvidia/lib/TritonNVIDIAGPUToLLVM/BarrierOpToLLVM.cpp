@@ -411,7 +411,7 @@ struct CLCTryCancelOpConversion
     auto numCTAs = ttg::lookupNumCTAs(op);
     if (numCTAs > 1) {
       TritonLLVMOpBuilder b(loc, rewriter);
-      auto clusterCtaId = targetInfo->getClusterCTAId(rewriter, loc);
+      Value clusterCtaId = NVVM::ClusterId::create(rewriter, loc, i32_ty);
       pred = b.and_(pred, b.icmp_eq(clusterCtaId, b.i32_val(0)));
     }
 
