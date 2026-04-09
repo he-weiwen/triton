@@ -753,10 +753,9 @@ def test_matmul_warp_specialized_clc(cga_layout):
         return_compiled=True,
     )
 
-    expected_fallback = 2 if len(cga_layout) > 1 else 0
-    assert compiled.metadata.preferred_cluster_fallback_ctas == expected_fallback
+    assert compiled.metadata.preferred_cluster_fallback_ctas == 0
     assert "clusterlaunchcontrol" in compiled.asm["ptx"]
-    assert (".reqnctapercluster" in compiled.asm["ptx"]) == (expected_fallback == 0)
+    assert ".reqnctapercluster" in compiled.asm["ptx"]
     torch.testing.assert_close(torch.matmul(a, b), actual, atol=1e-1, rtol=1e-2)
 
 

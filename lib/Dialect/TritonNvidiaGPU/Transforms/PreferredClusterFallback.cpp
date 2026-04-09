@@ -41,16 +41,6 @@ static bool moduleRequestsConSan(ModuleOp mod) {
   return false;
 }
 
-static bool isSupportedMBarrierType(ttg::MemDescType barrierTy) {
-  auto kBlock = StringAttr::get(barrierTy.getContext(), "block");
-  uint32_t cgaBroadcastMask =
-      toLinearLayout(barrierTy).getFreeVariableMasks().lookup(kBlock);
-
-  // Broadcast mbarriers use another CTA's barrier, so we only allow broadcast
-  // on the first bit (i.e., CTA0 and CTA1).
-  return cgaBroadcastMask <= 1;
-}
-
 class TritonNvidiaGPUPreferredClusterFallbackPass
     : public impl::TritonNvidiaGPUPreferredClusterFallbackPassBase<
           TritonNvidiaGPUPreferredClusterFallbackPass> {
@@ -73,12 +63,23 @@ public:
     WalkResult result = mod.walk([&](Operation *op) -> WalkResult {
       auto unsupported = [&] { return WalkResult::interrupt(); };
 
+      // You can do pretty much anything with inline asm
       if (isa<triton::ElementwiseInlineAsmOp>(op))
         return unsupported();
 
+      // You can synchronise CTAs with global atomic operations
       if (isa<triton::AtomicRMWOp, triton::AtomicCASOp>(op))
         return unsupported();
 
+      // NYI: CLC can redirect a CTA to work from a different program.  To
+      // support preferred fallback, ProgramCTAIdOp must be derived from the
+      // canceled CTA id returned by CLC, not from the thief CTA's block id.
+      // This seems tricky to implement
+      if (isa<ttng::CLCTryCancelOp, ttng::CLCLoadResultOp,
+              ttng::CLCIsCanceledOp, ttng::CLCGetProgramIdOp>(op))
+        return unsupported();
+
+      // NYI: We could have cvt_layout in the first 2 CTAs or reduces
       if (auto cvt = dyn_cast<ttg::ConvertLayoutOp>(op)) {
         if (hasCrossCTAConvertLayout(cvt))
           return unsupported();
@@ -91,18 +92,21 @@ public:
         return WalkResult::advance();
       }
 
-      if (isa<ttng::AsyncTMAReduceOp, ttng::AsyncTMAGatherOp,
-              ttng::AsyncTMAScatterOp>(op))
-        return unsupported();
-
+      // You can synchronise CTAs with cluster barriers + global loads
       if (isa<ttng::ClusterArriveOp, ttng::ClusterWaitOp,
               ttng::ClusterBarrierOp>(op))
         return unsupported();
 
       if (auto barrierOp = dyn_cast<ttg::MBarrierOpInterface>(op)) {
+        auto kBlock = StringAttr::get(barrierOp->getContext(), "block");
         for (Value barrier : barrierOp.getBarriers()) {
           auto barrierTy = cast<ttg::MemDescType>(barrier.getType());
-          if (!isSupportedMBarrierType(barrierTy))
+          uint32_t cgaBroadcastMask =
+              toLinearLayout(barrierTy).getFreeVariableMasks().lookup(kBlock);
+
+          // Broadcast mbarriers use another CTA's barrier, so we only allow
+          // broadcast on the first bit (i.e., CTA0 and CTA1).
+          if (cgaBroadcastMask > 1)
             return unsupported();
         }
       }

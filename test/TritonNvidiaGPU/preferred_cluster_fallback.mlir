@@ -79,6 +79,17 @@ module attributes {"ttg.num-ctas" = 4 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 
 // -----
 
+module attributes {"ttg.num-ctas" = 4 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:100", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-NOT: ttng.preferred-cluster-fallback-ctas
+  // CHECK-LABEL: tt.func @reject_clc
+  tt.func @reject_clc(%clc: i128) -> i32 {
+    %pid = ttng.clc_get_program_id %clc, x : i128 -> i32
+    tt.return %pid : i32
+  }
+}
+
+// -----
+
 module attributes {"ttg.num-ctas" = 4 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:100", "ttg.threads-per-warp" = 32 : i32, "ttg.instrumentation_mode" = "consan"} {
   // CHECK-NOT: ttng.preferred-cluster-fallback-ctas
   // CHECK-LABEL: tt.func @reject_consan_marked_module
