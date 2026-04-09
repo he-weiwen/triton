@@ -44,10 +44,8 @@ struct GetNumProgramsOpConversion
   LogicalResult
   matchAndRewrite(triton::GetNumProgramsOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    // It is not easy to get the compute capability here, so we use numCTAs to
-    // decide the semantic of GetNumProgramsOp. If numCTAs = 1, then
-    // GetNumProgramsOp is converted to "%nctaid", otherwise it is converted to
-    // "%nclusterid".
+    // getNumPrograms handles the X-only CUDA grid expansion used for multi-CTA
+    // launches.
     rewriter.replaceOp(op,
                        getNumPrograms(rewriter, op->getParentOfType<ModuleOp>(),
                                       op.getLoc(), op.getAxis()));

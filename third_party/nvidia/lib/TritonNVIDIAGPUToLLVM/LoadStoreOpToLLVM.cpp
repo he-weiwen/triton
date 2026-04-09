@@ -1192,7 +1192,7 @@ struct AsyncTMACopyGlobalToLocalOpConversion
     auto kBlock = str_attr("block");
     const auto numCopies = msgToOffset.getInDimSize(kMsg);
     auto zero = b.i32_val(0);
-    Value ctaId = triton::nvgpu::ClusterCTAIdOp::create(rewriter, loc);
+    Value ctaId = triton::nvgpu::ProgramCTAIdOp::create(rewriter, loc);
     // We multicast if the flag is on and the block layout has broadcasting
     bool multicast = op.getMulticast();
     Value multicastMask;
@@ -1344,7 +1344,7 @@ LogicalResult convertTMAStoreLikeOp(Operation *op,
   auto kBlock = str_attr("block");
   auto numCopies = msgToOffset.getInDimSize(kMsg);
   auto zero = b.i32_val(0);
-  Value ctaId = triton::nvgpu::ClusterCTAIdOp::create(rewriter, loc);
+  Value ctaId = triton::nvgpu::ProgramCTAIdOp::create(rewriter, loc);
 
   for (int copyIdx = 0; copyIdx < numCopies; copyIdx += numWarps) {
     int numWarpsToCopy = std::min(numCopies - copyIdx, numWarps);
@@ -1545,7 +1545,7 @@ static LogicalResult iterateGatherScatterIndices(
     return op->emitError("x offsets must be broadcasted across each warp");
 
   Value warpId = mlir::triton::gpu::WarpIdOp::create(rewriter, loc);
-  Value blockId = triton::nvgpu::ClusterCTAIdOp::create(rewriter, loc);
+  Value blockId = triton::nvgpu::ProgramCTAIdOp::create(rewriter, loc);
 
   // Mask out warps with redundant x offsets.
   pred = b.and_(pred,

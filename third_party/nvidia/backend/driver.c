@@ -1419,11 +1419,9 @@ static PyObject *launchKernel(PyObject *self, PyObject *args) {
   }
 
 #if !TRITON_HAS_PREFERRED_CLUSTER_LAUNCH
-  if (preferred_cluster_fallback_ctas != 0) {
-    PyErr_SetString(PyExc_RuntimeError,
-                    "preferred cluster fallback requires CUDA 12.8+ headers");
-    goto cleanup;
-  }
+  // Older CUDA headers cannot spell the preferred-cluster launch attribute.
+  // Ignore the optional fallback and launch the preferred cluster as required.
+  preferred_cluster_fallback_ctas = 0;
 #endif
 
   // launch entry hook.

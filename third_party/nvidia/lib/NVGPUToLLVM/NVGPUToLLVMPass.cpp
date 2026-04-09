@@ -223,14 +223,14 @@ public:
   }
 };
 
-class ClusterCTAIdOpPattern : public OpRewritePattern<ttn::ClusterCTAIdOp> {
-  using OpRewritePattern<ttn::ClusterCTAIdOp>::OpRewritePattern;
+class ProgramCTAIdOpPattern : public OpRewritePattern<ttn::ProgramCTAIdOp> {
+  using OpRewritePattern<ttn::ProgramCTAIdOp>::OpRewritePattern;
 
-  LogicalResult matchAndRewrite(ttn::ClusterCTAIdOp op,
+  LogicalResult matchAndRewrite(ttn::ProgramCTAIdOp op,
                                 PatternRewriter &rewriter) const override {
     auto moduleOp = op->getParentOfType<ModuleOp>();
     assert(moduleOp && moduleOp->hasAttr("ttg.num-ctas") &&
-           "ClusterCTAIdOp requires a TritonGPU module with ttg.num-ctas");
+           "ProgramCTAIdOp requires a TritonGPU module with ttg.num-ctas");
 
     auto loc = op.getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -660,7 +660,7 @@ public:
     ModuleOp mod = getOperation();
     RewritePatternSet patterns(context);
 
-    patterns.add<ClusterCTAIdOpPattern, WGMMAOpPattern, LoadAcquireOpPattern,
+    patterns.add<ProgramCTAIdOpPattern, WGMMAOpPattern, LoadAcquireOpPattern,
                  WGMMAWaitGroupOpPattern, WarpIdOpPattern>(context);
 
     if (applyPatternsGreedily(mod, std::move(patterns)).failed())
