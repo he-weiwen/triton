@@ -604,22 +604,6 @@ bool isExpensiveLoadOrStore(Operation *op) {
   return true;
 }
 
-bool isExpensiveToRemat(Operation *op, Attribute &targetEncoding) {
-  if (!op)
-    return true;
-  if (isa<triton::LoadOp, triton::StoreOp>(op))
-    return isExpensiveLoadOrStore(op);
-  if (isa<triton::CatOp>(op))
-    return triton::gpu::isExpensiveCat(cast<triton::CatOp>(op), targetEncoding);
-  if (isa<triton::gpu::AsyncCopyGlobalToLocalOp, triton::AtomicRMWOp,
-          triton::AtomicCASOp, triton::DotOp>(op))
-    return true;
-  if (isa<scf::YieldOp, scf::ForOp, scf::IfOp, scf::WhileOp, scf::ConditionOp>(
-          op))
-    return true;
-  return false;
-}
-
 bool canUseResultEncoding(Operation *op, Attribute targetEncoding) {
   if (isa<triton::CatOp>(op))
     return !triton::gpu::isExpensiveCat(cast<triton::CatOp>(op),
@@ -1077,7 +1061,7 @@ std::optional<StringRef> getAMDArch(Operation *module) {
   return ref.drop_front(4); // drop the "hip:"
 }
 
-inline ttg::SwizzledSharedEncodingAttr
+static inline ttg::SwizzledSharedEncodingAttr
 swizzleDotOperandLike(RankedTensorType type, ttg::CGAEncodingAttr cgaLayout) {
   // We want to see if the linear layout has the same order as an mma microtile
   // of shape (8, 4*kWidth) or (4*kWidth, 8). If so, we return a

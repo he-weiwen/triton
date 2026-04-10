@@ -128,14 +128,15 @@ SmallVector<Value> TDMDescriptor::getAllGroups() const {
 }
 
 // Swap the trailing two dimensions of a vector for TDM operations.
-template <typename T> void swapTrailingDims(SmallVector<T> &vec) {
+template <typename T> static void swapTrailingDims(SmallVector<T> &vec) {
   assert(vec.size() >= 2 && "need at least 2 dims to swap");
   std::swap(vec[vec.size() - 2], vec[vec.size() - 1]);
 }
 
 // Decode a full TDM descriptor from all 4 group vectors for 3D-5D tensors
 // Returns (base, tensorShape[], tensorStride[], blockShape[])
-std::tuple<Value, SmallVector<Value>, SmallVector<Value>, SmallVector<Value>>
+static std::tuple<Value, SmallVector<Value>, SmallVector<Value>,
+                  SmallVector<Value>>
 decodeTDMDescriptorFull(RewriterBase &rewriter, Location loc,
                         ArrayRef<Value> group0, ArrayRef<Value> group1,
                         std::optional<ArrayRef<Value>> group2,
