@@ -292,10 +292,10 @@ bool NVIDIA::canSkipBarSync(Operation *before, Operation *after,
                             Allocation *allocation) {
   // These mbarrier ops are single threaded, so are always synchronized wrt.
   // each other.
-  if (isa<ttng::InitBarrierOp, ttng::InvalBarrierOp, ttng::BarrierExpectOp>(
-          before) &&
-      isa<ttng::InitBarrierOp, ttng::InvalBarrierOp, ttng::BarrierExpectOp>(
-          after))
+  if (isa<ttng::InitBarrierOp, ttng::InitMmaBarrierOp, ttng::InvalBarrierOp,
+          ttng::BarrierExpectOp>(before) &&
+      isa<ttng::InitBarrierOp, ttng::InitMmaBarrierOp, ttng::InvalBarrierOp,
+          ttng::BarrierExpectOp>(after))
     return true;
 
   // wait_barrier will never run ahead of the load it's waiting on

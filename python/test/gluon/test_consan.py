@@ -1122,8 +1122,7 @@ def test_tma_tcgen05_mma_multicast_loop(FAILURE, device, run_wrapper, monkeypatc
         tma_bar = mbarrier.allocate_mbarrier(two_ctas=True)
         mbarrier.init(tma_bar, count=1)
         mma_bar = mbarrier.allocate_mbarrier()
-        mma_bar_count: ttgl.constexpr = blackwell.tcgen05_mma_barrier_count([smemA, smemB], True)
-        mbarrier.init(mma_bar, count=mma_bar_count)
+        mbarrier.init_tcgen05_mma(mma_bar, [smemA, smemB])
         acc = blackwell.allocate_tensor_memory(ttgl.float32, [block_m, block_n], acc_layout)
 
         phase_tma = 0

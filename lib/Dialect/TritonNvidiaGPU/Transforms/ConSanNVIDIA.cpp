@@ -48,6 +48,11 @@ public:
                        barrierTy.getNumElements();
       return BarrierInitInfo{initOp.getAlloc(), count};
     }
+    if (auto initOp = dyn_cast<ttng::InitMmaBarrierOp>(op)) {
+      uint32_t count = ttng::getTCGen5MmaBarrierCount(initOp.getDescs(),
+                                                      /*fallback=*/false);
+      return BarrierInitInfo{initOp.getAlloc(), count};
+    }
     return std::nullopt;
   }
 
@@ -84,6 +89,8 @@ public:
       return toLinearLayout(barrierTy).getFreeVariableMasks().lookup(kBlock);
     };
     if (auto initOp = dyn_cast<ttng::InitBarrierOp>(op))
+      mask = getBarrierMask(initOp.getAlloc());
+    if (auto initOp = dyn_cast<ttng::InitMmaBarrierOp>(op))
       mask = getBarrierMask(initOp.getAlloc());
     if (auto expectOp = dyn_cast<ttng::BarrierExpectOp>(op))
       mask = getBarrierMask(expectOp.getAlloc());

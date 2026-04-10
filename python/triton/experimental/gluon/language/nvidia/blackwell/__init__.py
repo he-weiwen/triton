@@ -540,45 +540,6 @@ def tcgen05_mma_scaled(a, b, acc, a_scale, b_scale, a_type, b_type, *, use_acc=T
                                                 acc.layout.two_ctas, multicast)
 
 
-@constexpr_function
-def tcgen05_mma_barrier_count(smems, multicast):
-    """
-    Calculate the number of CTAs that will commit the tcgen05 MMA instruction.
-
-    Args:
-        smems (Sequence[shared_memory_descriptor]): Shared memory descriptors used in the tcgen05 instruction.
-        multicast (bool): Whether the tcgen05 instruction is multicast.
-
-    Returns:
-        int: The number of CTAs that will commit the tcgen05 MMA instruction.
-    """
-    assert 0 <= len(smems) <= 2, "tcgen05_mma_barrier_count supports 0, 1, or 2 smem descriptors"
-    if not smems or not multicast:
-        return 1
-
-    def basis_is_zero(basis):
-        return all(b == 0 for b in basis)
-
-    def num_broadcast_bits(smem):
-        return sum(basis_is_zero(basis) for basis in smem.layout.cga_layout)
-
-    if len(smems) == 1:
-        return 2**num_broadcast_bits(smems[0])
-
-    assert len(smems) == 2
-    num_broadcast_bits_a = num_broadcast_bits(smems[0])
-    num_broadcast_bits_b = num_broadcast_bits(smems[1])
-    # Assert that for every basis, at least one of them is non-zero
-    # so that the inclusion-exclusion principle below works
-    # This can be generalised if needed by substracting below 2**size_intersection
-    for i in range(len(smems[0].layout.cga_layout)):
-        assert not basis_is_zero(smems[0].layout.cga_layout[i]) or not basis_is_zero(smems[1].layout.cga_layout[i])
-
-    # Inclusion-exclusion
-    num_cta_commits = 2**num_broadcast_bits_a + 2**num_broadcast_bits_b - 1
-    return num_cta_commits
-
-
 @builtin
 def tcgen05_commit(barrier, pred=True, descs=(), _semantic=None):
     """

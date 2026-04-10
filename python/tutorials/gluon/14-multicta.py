@@ -76,7 +76,6 @@ from triton.experimental.gluon.language.nvidia.blackwell import (
     clc,
     tcgen05_commit,
     tcgen05_mma,
-    tcgen05_mma_barrier_count,
     tensor_memory_descriptor,
 )
 from triton.experimental.gluon.language.nvidia.hopper import mbarrier, tma
@@ -530,9 +529,10 @@ def test_tma_multicast_copy():
 # group to complete before it can continue the next iteration, as otherwise the next iteration's
 # TMA loads will overwrite the data from the previous iteration before it has finished consuming it.
 #
-# As such, in this case, we need to use tcgen05_mma_barrier_count to compute the number of CTAs
-# in a multicast group. Similarly we set the `multicast=True` flag on the tcgen05_mma instruction
-# to note that it will have to wait for the multicast group to complete before it can continue.
+# As such, in this case, we need to initialize the MMA completion barrier using
+# `mbarrier.init_tcgen05_mma`. Similarly we set the `multicast=True` flag on
+# the tcgen05_mma instruction to note that it will have to wait for the
+# multicast group to complete before it can continue.
 #
 # These functions are generic, so a pattern of this form would work also for non-multicast kernels
 # or non-2CTA kernels.
@@ -550,7 +550,7 @@ def tma_tcgen05_kernel(a_desc, b_desc, out_desc, NUM_K_TILES: gl.constexpr, acc_
     tma_bar = mbarrier.allocate_mbarrier(two_ctas=True)
     mma_bar = mbarrier.allocate_mbarrier()
     mbarrier.init(tma_bar, count=1)
-    mbarrier.init(mma_bar, count=tcgen05_mma_barrier_count([smem_a, smem_b], multicast=True))
+    mbarrier.init_tcgen05_mma(mma_bar, [smem_a, smem_b])
 
     acc_tmem = allocate_tensor_memory(gl.float32, [block_m, block_n], acc_tmem_layout)
 
@@ -971,12 +971,10 @@ def matmul_multicta_kernel(
     dtype: gl.constexpr = a_desc.dtype
     a_bufs = gl.allocate_shared_memory(dtype, [STAGES] + a_desc.block_shape, a_desc.layout)
     b_bufs = gl.allocate_shared_memory(dtype, [STAGES] + b_desc.block_shape, b_desc.layout)
-    mma_barrier_count: gl.constexpr = tcgen05_mma_barrier_count([a_bufs.index(0), b_bufs.index(0)], multicast=True)
-
     load_empty_bars = mbarrier.allocate_mbarrier(batch=STAGES)
     load_ready_bars = mbarrier.allocate_mbarrier(batch=STAGES, two_ctas=two_ctas)
     for i in gl.static_range(STAGES):
-        mbarrier.init(load_empty_bars.index(i), count=mma_barrier_count)
+        mbarrier.init_tcgen05_mma(load_empty_bars.index(i), [a_bufs.index(0), b_bufs.index(0)])
         mbarrier.init(load_ready_bars.index(i), count=1)
 
     tmem_layout: gl.constexpr = TensorMemoryLayout(
@@ -990,7 +988,7 @@ def matmul_multicta_kernel(
     acc_ready_bars = mbarrier.allocate_mbarrier(batch=ACC_STAGES)
     for i in gl.static_range(ACC_STAGES):
         mbarrier.init(acc_empty_bars.index(i), count=1)
-        mbarrier.init(acc_ready_bars.index(i), count=mma_barrier_count)
+        mbarrier.init_tcgen05_mma(acc_ready_bars.index(i), [a_bufs.index(0), b_bufs.index(0)])
 
     clc_barriers = mbarrier.allocate_mbarrier(batch=ACC_STAGES)
     clc_planar_ready_bars = mbarrier.allocate_mbarrier(batch=ACC_STAGES)
