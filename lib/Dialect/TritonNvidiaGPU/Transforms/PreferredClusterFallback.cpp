@@ -92,10 +92,18 @@ public:
         return WalkResult::advance();
       }
 
-      // You can synchronise CTAs with cluster barriers + global loads
-      if (isa<ttng::ClusterArriveOp, ttng::ClusterWaitOp,
-              ttng::ClusterBarrierOp>(op))
+      if (isa<ttng::ClusterWaitOp>(op))
         return unsupported();
+      if (auto arrive = dyn_cast<ttng::ClusterArriveOp>(op)) {
+        if (!arrive.getRelaxed())
+          return unsupported();
+        return WalkResult::advance();
+      }
+      if (auto barrier = dyn_cast<ttng::ClusterBarrierOp>(op)) {
+        if (!barrier.getRelaxed())
+          return unsupported();
+        return WalkResult::advance();
+      }
 
       if (auto barrierOp = dyn_cast<ttg::MBarrierOpInterface>(op)) {
         auto kBlock = StringAttr::get(barrierOp->getContext(), "block");
