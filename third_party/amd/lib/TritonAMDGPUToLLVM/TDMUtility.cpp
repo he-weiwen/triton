@@ -15,8 +15,8 @@ namespace mlir::LLVM::AMD {
 namespace {
 
 // Helper to decode a value spanning two 32-bit words
-static Value decode48BitValue(RewriterBase &rewriter, TritonLLVMOpBuilder &b,
-                              ArrayRef<Value> group, int startIdx) {
+Value decode48BitValue(RewriterBase &rewriter, TritonLLVMOpBuilder &b,
+                       ArrayRef<Value> group, int startIdx) {
   Value low = b.lshr(group[startIdx], b.i32_val(16));
   Value high = b.shl(group[startIdx + 1], b.i32_val(16));
   return b.or_(low, high);
@@ -128,15 +128,14 @@ SmallVector<Value> TDMDescriptor::getAllGroups() const {
 }
 
 // Swap the trailing two dimensions of a vector for TDM operations.
-template <typename T> static void swapTrailingDims(SmallVector<T> &vec) {
+template <typename T> void swapTrailingDims(SmallVector<T> &vec) {
   assert(vec.size() >= 2 && "need at least 2 dims to swap");
   std::swap(vec[vec.size() - 2], vec[vec.size() - 1]);
 }
 
 // Decode a full TDM descriptor from all 4 group vectors for 3D-5D tensors
 // Returns (base, tensorShape[], tensorStride[], blockShape[])
-static std::tuple<Value, SmallVector<Value>, SmallVector<Value>,
-                  SmallVector<Value>>
+std::tuple<Value, SmallVector<Value>, SmallVector<Value>, SmallVector<Value>>
 decodeTDMDescriptorFull(RewriterBase &rewriter, Location loc,
                         ArrayRef<Value> group0, ArrayRef<Value> group1,
                         std::optional<ArrayRef<Value>> group2,
@@ -512,9 +511,8 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
 // Returns a copy of `layout` where the semantics of dimA and dimB are
 // exchanged: new.apply(x)[dimA] == old.apply(x)[dimB] and vice versa. The
 // output dimension order is preserved.
-static triton::LinearLayout
-swapOutDimSemantics(const triton::LinearLayout &layout, StringAttr dimA,
-                    StringAttr dimB) {
+triton::LinearLayout swapOutDimSemantics(const triton::LinearLayout &layout,
+                                         StringAttr dimA, StringAttr dimB) {
   assert(layout.hasOutDim(dimA));
   assert(layout.hasOutDim(dimB));
   SmallVector<std::pair<StringAttr, int32_t>> renamedOutDims;
@@ -900,7 +898,7 @@ void fillTDMDescriptorForGatherScatter(
 // instructions, each instruction writes a "slice" of data into each partition
 // buffer.  We need to know the padded size of that slice so the next
 // instruction can offset its LDS pointer correctly.
-static int64_t computePerPartitionSliceStride(
+int64_t computePerPartitionSliceStride(
     ArrayRef<int64_t> blockShape, unsigned partitionDim,
     int64_t sliceExtentPerPartition, unsigned numPartitions,
     triton::gpu::PartitionedSharedEncodingAttr partitionedEnc) {
@@ -931,16 +929,17 @@ static int64_t computePerPartitionSliceStride(
 
 // Emit a single TDM intrinsic (load or store) for the given block shape.
 // This handles both the 2D (d2 intrinsic) and >2D (full intrinsic) cases.
-static void
-emitTDMIntrinsic(RewriterBase &rewriter, Location loc,
-                 const LLVMTypeConverter *typeConverter, ArrayRef<Value> desc,
-                 size_t numDims, Type elementType,
-                 SmallVector<int64_t> effectiveBlockShape, int numWarps,
-                 unsigned padInterval, unsigned padAmount,
-                 SmallVector<Value> globalOffset, ArrayRef<Value> instrDstPtrs,
-                 Value pred, Value multicastMask, Value barrier,
-                 const triton::LinearLayout &instrSharedLayout, Value ctaId,
-                 bool isLoad, bool isRowMajor, ArrayRef<unsigned> warpsPerCTA) {
+void emitTDMIntrinsic(RewriterBase &rewriter, Location loc,
+                      const LLVMTypeConverter *typeConverter,
+                      ArrayRef<Value> desc, size_t numDims, Type elementType,
+                      SmallVector<int64_t> effectiveBlockShape, int numWarps,
+                      unsigned padInterval, unsigned padAmount,
+                      SmallVector<Value> globalOffset,
+                      ArrayRef<Value> instrDstPtrs, Value pred,
+                      Value multicastMask, Value barrier,
+                      const triton::LinearLayout &instrSharedLayout,
+                      Value ctaId, bool isLoad, bool isRowMajor,
+                      ArrayRef<unsigned> warpsPerCTA) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   auto v8i32Ty = VectorType::get(8, rewriter.getI32Type());
   Value group4Zero = LLVM::ZeroOp::create(rewriter, loc, v8i32Ty);
