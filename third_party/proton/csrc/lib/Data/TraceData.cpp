@@ -9,7 +9,6 @@
 #include <functional>
 #include <iterator>
 #include <limits>
-#include <optional>
 #include <sstream>
 #include <stdexcept>
 
@@ -19,7 +18,47 @@ namespace proton {
 
 namespace {
 inline constexpr size_t kMaxActiveEventStackCacheObjects = 10;
-}
+inline constexpr size_t kNoParentStackFrameId =
+    std::numeric_limits<size_t>::max();
+
+struct StackFrame {
+  std::string name;
+  size_t parentId = kNoParentStackFrameId;
+};
+
+using StackFrameMap = std::map<size_t, StackFrame>;
+
+class StackFrameTable {
+public:
+  explicit StackFrameTable(size_t nextFrameId)
+      : nextFrameId(nextFrameId) {}
+
+  size_t intern(size_t parentId, const std::vector<Context> &contexts) {
+    for (const auto &context : contexts) {
+      parentId = internFrame(context.name, parentId);
+    }
+    return parentId;
+  }
+
+  const StackFrameMap &getFrames() const { return frames; }
+
+private:
+  size_t internFrame(const std::string &name, size_t parentId) {
+    const auto key = std::make_pair(parentId, name);
+    if (auto it = frameKeyToId.find(key); it != frameKeyToId.end()) {
+      return it->second;
+    }
+    const auto id = nextFrameId++;
+    frames.emplace(id, StackFrame{name, parentId});
+    frameKeyToId.emplace(key, id);
+    return id;
+  }
+
+  size_t nextFrameId = 0;
+  StackFrameMap frames;
+  std::map<std::pair<size_t, std::string>, size_t> frameKeyToId;
+};
+} // namespace
 
 class TraceData::Trace {
 public:
@@ -143,6 +182,19 @@ public:
   void removeEvent(size_t eventId) { traceEvents.erase(eventId); }
 
   const std::map<size_t, Event> &getEvents() const { return traceEvents; }
+
+  size_t getMaxContextId() const { return traceContextMap.rbegin()->first; }
+
+  StackFrameMap getStackFrames() const {
+    StackFrameMap stackFrameTable;
+    for (const auto &[id, context] : traceContextMap) {
+      stackFrameTable.emplace(
+          id, StackFrame{context.name, context.parentId == TraceContext::DummyId
+                                           ? kNoParentStackFrameId
+                                           : context.parentId});
+    }
+    return stackFrameTable;
+  }
 
 private:
   size_t nextTreeContextId = TraceContext::RootId + 1;
@@ -294,31 +346,28 @@ struct CycleEvent {
 struct KernelEvent {
   const KernelMetric *kernelMetric{};
   const DataEntry::FlexibleMetricMap *flexibleMetrics{};
-  std::vector<Context> contexts;
+  size_t stackFrameId{};
   size_t launchEventId{};
   bool isGraphLinked{};
 
   KernelEvent(const KernelMetric *metric,
               const DataEntry::FlexibleMetricMap *metrics,
-              std::vector<Context> contexts, size_t launchId,
-              bool isGraphLinked)
-      : kernelMetric(metric), flexibleMetrics(metrics),
-        contexts(std::move(contexts)), launchEventId(launchId),
-        isGraphLinked(isGraphLinked) {}
+              size_t stackFrameId, size_t launchId, bool isGraphLinked)
+      : kernelMetric(metric), flexibleMetrics(metrics), stackFrameId(stackFrameId),
+        launchEventId(launchId), isGraphLinked(isGraphLinked) {}
 };
 
 struct CpuScopeEvent {
   size_t eventId;
-  std::vector<Context> contexts;
+  size_t stackFrameId;
   size_t threadId;
   uint64_t startTimeNs;
   uint64_t endTimeNs;
   const DataEntry::FlexibleMetricMap *flexibleMetrics{};
 
   CpuScopeEvent(size_t eventId, const DataEntry::FlexibleMetricMap *metrics,
-                std::vector<Context> contexts, size_t tid, uint64_t start,
-                uint64_t end)
-      : eventId(eventId), contexts(std::move(contexts)), threadId(tid),
+                size_t stackFrameId, size_t tid, uint64_t start, uint64_t end)
+      : eventId(eventId), stackFrameId(stackFrameId), threadId(tid),
         startTimeNs(start), endTimeNs(end), flexibleMetrics(metrics) {}
 };
 
@@ -530,18 +579,58 @@ std::string formatFlexibleMetricValue(const MetricValueType &value) {
       value);
 }
 
-json buildCallStackJson(const std::vector<Context> &contexts) {
-  json callStack = json::array();
-  for (const auto &ctx : contexts) {
-    callStack.push_back(ctx.name);
+std::vector<std::string> buildCallStack(const StackFrameMap &stackFrames,
+                                        size_t stackFrameId) {
+  std::vector<std::string> callStack;
+  while (true) {
+    auto it = stackFrames.find(stackFrameId);
+    if (it == stackFrames.end()) {
+      throw std::runtime_error("Stack frame not found");
+    }
+    callStack.push_back(it->second.name);
+    if (it->second.parentId == kNoParentStackFrameId) {
+      break;
+    }
+    stackFrameId = it->second.parentId;
   }
+  std::reverse(callStack.begin(), callStack.end());
   return callStack;
 }
 
-json buildCallStackJson(const Context &context) {
-  json callStack = json::array();
-  callStack.push_back(context.name);
-  return callStack;
+json buildCallStackJson(const StackFrameMap &stackFrames, size_t stackFrameId) {
+  auto callStack = buildCallStack(stackFrames, stackFrameId);
+  json callStackJson = json::array();
+  for (const auto &name : callStack) {
+    callStackJson.push_back(name);
+  }
+  return callStackJson;
+}
+
+json buildStackFramesJson(const StackFrameMap &stackFrames) {
+  json stackFramesJson = json::object();
+  for (const auto &[id, frame] : stackFrames) {
+    auto &stackFrame = stackFramesJson[std::to_string(id)];
+    stackFrame["name"] = frame.name;
+    if (frame.parentId != kNoParentStackFrameId) {
+      stackFrame["parent"] = frame.parentId;
+    }
+  }
+  return stackFramesJson;
+}
+
+const std::string &getStackFrameName(const StackFrameMap &stackFrames,
+                                     size_t stackFrameId) {
+  auto it = stackFrames.find(stackFrameId);
+  if (it == stackFrames.end()) {
+    throw std::runtime_error("Stack frame not found");
+  }
+  return it->second.name;
+}
+
+void addStackFrameInfo(json &element, const StackFrameMap &stackFrames,
+                       size_t stackFrameId) {
+  element["args"]["call_stack"] = buildCallStackJson(stackFrames, stackFrameId);
+  element["sf"] = stackFrameId;
 }
 
 json buildFlexibleMetricsJson(
@@ -554,12 +643,10 @@ json buildFlexibleMetricsJson(
 }
 
 std::string buildFlexibleMetricEventName(
-    const std::vector<Context> &contexts,
+    const Context &context,
     const DataEntry::FlexibleMetricMap &flexibleMetrics) {
-  const auto &scopeName =
-      contexts.empty() ? GraphState::metricTag : contexts.back().name;
   std::ostringstream ss;
-  ss << scopeName << ": ";
+  ss << context.name << ": ";
   bool isFirst = true;
   for (const auto &[metricName, metricValue] : flexibleMetrics) {
     if (!isFirst) {
@@ -573,10 +660,10 @@ std::string buildFlexibleMetricEventName(
 }
 
 std::string buildFlexibleMetricEventName(
-    const Context &context,
+    const StackFrameMap &stackFrames, size_t stackFrameId,
     const DataEntry::FlexibleMetricMap &flexibleMetrics) {
   std::ostringstream ss;
-  ss << context.name << ": ";
+  ss << getStackFrameName(stackFrames, stackFrameId) << ": ";
   bool isFirst = true;
   for (const auto &[metricName, metricValue] : flexibleMetrics) {
     if (!isFirst) {
@@ -657,6 +744,7 @@ void emitTraceLaneMetadata(
 }
 
 void reconstructGraphScopeEvents(
+    const StackFrameMap &stackFrames,
     const std::map<size_t, std::vector<KernelEvent>> &kernelEvents,
     std::map<size_t, std::vector<GraphScopeEvent>> &graphScopeEvents) {
   struct OpenGraphScope {
@@ -673,17 +761,17 @@ void reconstructGraphScopeEvents(
       std::vector<Context> graphContexts;
       bool seenCaptureTag = false;
       bool isMetadataKernel = false;
-      for (const auto &context : kernelEvent.contexts) {
-        if (context.name == GraphState::metricTag ||
-            context.name == GraphState::metadataTag) {
+      for (const auto &name : buildCallStack(stackFrames,
+                                             kernelEvent.stackFrameId)) {
+        if (name == GraphState::metricTag || name == GraphState::metadataTag) {
           isMetadataKernel = true;
           break;
         }
-        if (context.name == GraphState::captureTag) {
+        if (name == GraphState::captureTag) {
           seenCaptureTag = true;
         }
         if (seenCaptureTag) {
-          graphContexts.push_back(context);
+          graphContexts.emplace_back(name);
         }
       }
       if (!seenCaptureTag) {
@@ -742,7 +830,7 @@ void reconstructGraphScopeEvents(
   }
 }
 
-void dumpKernelEvents(uint64_t minTimeStamp,
+void dumpKernelEvents(const StackFrameMap &stackFrames, uint64_t minTimeStamp,
                       std::map<size_t, std::vector<KernelEvent>> &kernelEvents,
                       json &object, std::ostream &os) {
   for (auto const &[streamId, events] : kernelEvents) {
@@ -759,13 +847,11 @@ void dumpKernelEvents(uint64_t minTimeStamp,
       double ts = static_cast<double>(startTimeNs - minTimeStamp) / 1000;
       double dur = static_cast<double>(endTimeNs - startTimeNs) / 1000;
 
-      const auto &contexts = event.contexts;
-
       json element;
       if (isMetricKernel) {
         element["name"] = GraphState::metricTag;
       } else {
-        element["name"] = contexts.back().name;
+        element["name"] = getStackFrameName(stackFrames, event.stackFrameId);
       }
       element["cat"] = "kernel";
       element["ph"] = "X";
@@ -773,7 +859,7 @@ void dumpKernelEvents(uint64_t minTimeStamp,
       element["ts"] = ts;
       element["dur"] = dur;
       element["tid"] = getGpuLaneId(streamId);
-      element["args"]["call_stack"] = buildCallStackJson(contexts);
+      addStackFrameInfo(element, stackFrames, event.stackFrameId);
       if (flexibleMetrics) {
         element["args"]["metrics"] = buildFlexibleMetricsJson(*flexibleMetrics);
       }
@@ -782,10 +868,10 @@ void dumpKernelEvents(uint64_t minTimeStamp,
   }
 }
 
-void dumpCpuScopeEvents(
-    uint64_t minTimeStamp,
-    std::map<size_t, std::vector<CpuScopeEvent>> &cpuScopeEvents, json &object,
-    std::ostream &os) {
+void dumpCpuScopeEvents(const StackFrameMap &stackFrames, uint64_t minTimeStamp,
+                        std::map<size_t, std::vector<CpuScopeEvent>>
+                            &cpuScopeEvents,
+                        json &object, std::ostream &os) {
   for (const auto &[threadId, events] : cpuScopeEvents) {
     for (const auto &event : events) {
       const auto *flexibleMetrics = event.flexibleMetrics;
@@ -796,13 +882,12 @@ void dumpCpuScopeEvents(
 
       json element;
       if (flexibleMetrics != nullptr && !flexibleMetrics->empty()) {
-        element["name"] =
-            buildFlexibleMetricEventName(event.contexts, *flexibleMetrics);
+        element["name"] = buildFlexibleMetricEventName(
+            stackFrames, event.stackFrameId, *flexibleMetrics);
         element["cat"] = "metric";
         element["args"]["metrics"] = buildFlexibleMetricsJson(*flexibleMetrics);
       } else {
-        element["name"] =
-            event.contexts.empty() ? "" : event.contexts.back().name;
+        element["name"] = getStackFrameName(stackFrames, event.stackFrameId);
         element["cat"] = "scope";
       }
       element["ph"] = "X";
@@ -810,7 +895,7 @@ void dumpCpuScopeEvents(
       element["ts"] = ts;
       element["dur"] = dur;
       element["tid"] = getCpuLaneId(threadId);
-      element["args"]["call_stack"] = buildCallStackJson(event.contexts);
+      addStackFrameInfo(element, stackFrames, event.stackFrameId);
       object["traceEvents"].push_back(std::move(element));
     }
   }
@@ -914,28 +999,36 @@ void dumpCpuToGpuFlowEvents(
 }
 
 void dumpKernelMetricTrace(
+    const StackFrameMap &stackFrames,
     uint64_t minTimeStamp,
     std::map<size_t, std::vector<KernelEvent>> &kernelEvents,
     std::map<size_t, std::vector<CpuScopeEvent>> &cpuScopeEvents,
     std::map<size_t, std::vector<GraphScopeEvent>> &graphScopeEvents,
+    json stackFramesJson,
     std::ostream &os) {
   json object = {{"displayTimeUnit", "us"}, {"traceEvents", json::array()}};
 
   emitTraceLaneMetadata(object, cpuScopeEvents, graphScopeEvents, kernelEvents);
-  dumpCpuScopeEvents(minTimeStamp, cpuScopeEvents, object, os);
+  dumpCpuScopeEvents(stackFrames, minTimeStamp, cpuScopeEvents, object, os);
   dumpGraphScopeEvents(minTimeStamp, graphScopeEvents, object, os);
   dumpCpuToGpuFlowEvents(minTimeStamp, cpuScopeEvents, kernelEvents, object);
-  dumpKernelEvents(minTimeStamp, kernelEvents, object, os);
+  dumpKernelEvents(stackFrames, minTimeStamp, kernelEvents, object, os);
+  if (!stackFramesJson.empty()) {
+    object["stackFrames"] = std::move(stackFramesJson);
+  }
 
   os << object.dump() << "\n";
 }
 
 void dumpCpuOnlyTrace(
-    uint64_t minTimeStamp,
+    const StackFrameMap &stackFrames, uint64_t minTimeStamp,
     std::map<size_t, std::vector<CpuScopeEvent>> &cpuScopeEvents,
-    std::ostream &os) {
+    json stackFramesJson, std::ostream &os) {
   json object = {{"displayTimeUnit", "us"}, {"traceEvents", json::array()}};
-  dumpCpuScopeEvents(minTimeStamp, cpuScopeEvents, object, os);
+  dumpCpuScopeEvents(stackFrames, minTimeStamp, cpuScopeEvents, object, os);
+  if (!stackFramesJson.empty()) {
+    object["stackFrames"] = std::move(stackFramesJson);
+  }
   os << object.dump() << "\n";
 }
 
@@ -981,6 +1074,8 @@ void TraceData::dumpChromeTrace(std::ostream &os, size_t phase) const {
     std::map</*stream_id=*/size_t, std::vector<GraphScopeEvent>>
         graphScopeEvents;
     std::vector<CycleEvent> cycleEvents;
+    auto stackFrames = trace->getStackFrames();
+    StackFrameTable stackFrameTable(trace->getMaxContextId() + 1);
     cycleEvents.reserve(events.size());
     // Initialize minTimeStamp to the maximum possible value to ensure correct
     // calculation of relative timestamps
@@ -996,7 +1091,8 @@ void TraceData::dumpChromeTrace(std::ostream &os, size_t phase) const {
     auto processMetricMaps =
         [&](size_t eventId, const DataEntry::MetricMap &metrics,
             const DataEntry::FlexibleMetricMap *flexibleMetrics,
-            const std::vector<Context> &contexts, bool isGraphLinked) {
+            const std::vector<Context> &contexts, size_t stackFrameId,
+            bool isGraphLinked) {
           if (auto kernelIt = metrics.find(MetricKind::Kernel);
               kernelIt != metrics.end()) {
             auto *kernelMetric =
@@ -1013,7 +1109,8 @@ void TraceData::dumpChromeTrace(std::ostream &os, size_t phase) const {
               launchEventId = events.at(launchEventId).parentEventId;
             }
             kernelEvents[streamId].emplace_back(kernelMetric, flexibleMetrics,
-                                                contexts, launchEventId,
+                                                stackFrameId,
+                                                launchEventId,
                                                 isGraphLinked);
             minTimeStamp = std::min(minTimeStamp, startTimeNs);
             hasKernelMetrics = true;
@@ -1034,13 +1131,14 @@ void TraceData::dumpChromeTrace(std::ostream &os, size_t phase) const {
             event.metricSet.flexibleMetrics.empty()
                 ? nullptr
                 : &event.metricSet.flexibleMetrics,
-            contextIdToContexts.at(event.contextId), event.threadId,
+            event.contextId, event.threadId,
             event.cpuStartTimeNs, event.cpuEndTimeNs);
         minTimeStamp = std::min(minTimeStamp, event.cpuStartTimeNs);
       } else { // Kernel or cycle event
         const auto &baseContexts = contextIdToContexts.at(event.contextId);
         processMetricMaps(event.id, event.metricSet.metrics,
                           &event.metricSet.flexibleMetrics, baseContexts,
+                          event.contextId,
                           /*isGraphLinked=*/false);
         for (const auto &[targetEntryId, _] : event.metricSet.linkedMetrics) {
           const auto &linkedMetrics =
@@ -1051,6 +1149,8 @@ void TraceData::dumpChromeTrace(std::ostream &os, size_t phase) const {
           auto &virtualContexts = targetIdToVirtualContexts[targetEntryId];
           contexts.insert(contexts.end(), virtualContexts.begin(),
                           virtualContexts.end());
+          auto stackFrameId =
+              stackFrameTable.intern(event.contextId, virtualContexts);
           // Not all kernels are associated with a flexible metric
           const DataEntry::FlexibleMetricMap *flexibleMetrics = nullptr;
           auto iter = event.metricSet.linkedFlexibleMetrics.find(targetEntryId);
@@ -1058,6 +1158,7 @@ void TraceData::dumpChromeTrace(std::ostream &os, size_t phase) const {
             flexibleMetrics = &iter->second;
           }
           processMetricMaps(event.id, linkedMetrics, flexibleMetrics, contexts,
+                            stackFrameId,
                             /*isGraphLinked=*/true);
         }
         if (hasKernelMetrics && hasCycleMetrics) {
@@ -1080,6 +1181,9 @@ void TraceData::dumpChromeTrace(std::ostream &os, size_t phase) const {
     }
 
     if (hasKernelMetrics) {
+      for (const auto &[id, frame] : stackFrameTable.getFrames()) {
+        stackFrames.emplace(id, frame);
+      }
       // Sort all kernel events in order
       for (auto &[streamId, events] : kernelEvents) {
         std::sort(events.begin(), events.end(),
@@ -1092,11 +1196,13 @@ void TraceData::dumpChromeTrace(std::ostream &os, size_t phase) const {
                   });
       }
       // Graph scopes are constructed in order
-      reconstructGraphScopeEvents(kernelEvents, graphScopeEvents);
-      dumpKernelMetricTrace(minTimeStamp, kernelEvents, cpuScopeEvents,
-                            graphScopeEvents, os);
+      reconstructGraphScopeEvents(stackFrames, kernelEvents, graphScopeEvents);
+      dumpKernelMetricTrace(stackFrames, minTimeStamp, kernelEvents,
+                            cpuScopeEvents, graphScopeEvents,
+                            buildStackFramesJson(stackFrames), os);
     } else if (!cpuScopeEvents.empty()) {
-      dumpCpuOnlyTrace(minTimeStamp, cpuScopeEvents, os);
+      dumpCpuOnlyTrace(stackFrames, minTimeStamp, cpuScopeEvents,
+                       buildStackFramesJson(stackFrames), os);
     } else {
       os << json({{"displayTimeUnit", "us"}, {"traceEvents", json::array()}})
                 .dump()
