@@ -511,8 +511,9 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
 // Returns a copy of `layout` where the semantics of dimA and dimB are
 // exchanged: new.apply(x)[dimA] == old.apply(x)[dimB] and vice versa. The
 // output dimension order is preserved.
-triton::LinearLayout swapOutDimSemantics(const triton::LinearLayout &layout,
-                                         StringAttr dimA, StringAttr dimB) {
+static triton::LinearLayout
+swapOutDimSemantics(const triton::LinearLayout &layout, StringAttr dimA,
+                    StringAttr dimB) {
   assert(layout.hasOutDim(dimA));
   assert(layout.hasOutDim(dimB));
   SmallVector<std::pair<StringAttr, int32_t>> renamedOutDims;
@@ -891,6 +892,8 @@ void fillTDMDescriptorForGatherScatter(
   }
 }
 
+namespace {
+
 // Compute how many elements each partition buffer advances between consecutive
 // TDM instruction slices, accounting for padding if present.
 //
@@ -990,6 +993,8 @@ void emitTDMIntrinsic(RewriterBase &rewriter, Location loc,
         {group0, group1, group2Zero, group3Zero, group4Zero, b.i32_val(0)});
   }
 }
+
+} // namespace
 
 // Emit TDM load/store, potentially split into multiple instructions for
 // partitioned shared memory.
