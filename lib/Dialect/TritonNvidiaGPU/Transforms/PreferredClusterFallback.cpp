@@ -92,8 +92,6 @@ public:
         return WalkResult::advance();
       }
 
-      if (isa<ttng::ClusterWaitOp>(op))
-        return unsupported();
       if (auto arrive = dyn_cast<ttng::ClusterArriveOp>(op)) {
         if (!arrive.getRelaxed())
           return unsupported();
