@@ -16,9 +16,12 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace proton {
@@ -42,6 +45,50 @@ void setPeriodicFlushingMode(bool &periodicFlushingEnabled,
                              std::string &periodicFlushingFormat,
                              const std::vector<std::string> &modeAndOptions,
                              const char *profilerName);
+
+template <typename Value> class ThreadSafeStealableVector {
+public:
+  using Vector = std::vector<Value>;
+  using VectorPtr = std::unique_ptr<Vector>;
+
+  ThreadSafeStealableVector()
+      : vector(std::make_unique<Vector>()) {}
+
+  void push_back(const Value &value) {
+    std::lock_guard<std::mutex> lock(mutex);
+    getVector().push_back(value);
+  }
+
+  void push_back(Value &&value) {
+    std::lock_guard<std::mutex> lock(mutex);
+    getVector().push_back(std::move(value));
+  }
+
+  template <typename... Args> void emplace_back(Args &&...args) {
+    std::lock_guard<std::mutex> lock(mutex);
+    getVector().emplace_back(std::forward<Args>(args)...);
+  }
+
+  VectorPtr steal() {
+    std::lock_guard<std::mutex> lock(mutex);
+    return std::move(vector);
+  }
+
+  void clear() {
+    std::lock_guard<std::mutex> lock(mutex);
+    vector.reset();
+  }
+
+private:
+  Vector &getVector() {
+    if (!vector)
+      vector = std::make_unique<Vector>();
+    return *vector;
+  }
+
+  VectorPtr vector;
+  std::mutex mutex;
+};
 } // namespace detail
 
 // Singleton<ConcreteProfilerT>: Each concrete GPU profiler, e.g.,
@@ -55,8 +102,10 @@ public:
   virtual ~GPUProfiler() = default;
 
   using CorrIdToExternIdMap =
-      ThreadSafeMap</*correlation_id=*/uint64_t, /*extern_id=*/size_t,
-                    std::unordered_map<uint64_t, size_t>>;
+      detail::ThreadSafeStealableVector<std::pair</*correlation_id=*/uint64_t,
+                                                  /*extern_id=*/size_t>>;
+  using CorrIdToExternIdStorage =
+      std::unordered_map</*correlation_id=*/uint64_t, /*extern_id=*/size_t>;
 
   struct ExternIdState {
     // ----non-graph launch fields----
@@ -74,8 +123,10 @@ public:
   };
 
   using ExternIdToStateMap =
-      ThreadSafeMap<size_t, ExternIdState,
-                    std::unordered_map<size_t, ExternIdState>>;
+      detail::ThreadSafeStealableVector<std::pair</*extern_id=*/size_t,
+                                                  ExternIdState>>;
+  using ExternIdToStateStorage =
+      std::unordered_map</*extern_id=*/size_t, ExternIdState>;
 
 protected:
   // OpInterface
@@ -173,13 +224,13 @@ protected:
 
     // Correlate the correlationId with the last externId
     void correlate(uint64_t correlationId, size_t externId, size_t numNodes,
-                   bool isMissingName, const DataToEntryMap &dataToEntry) {
-      corrIdToExternId.insert(correlationId, externId);
-      externIdToState.upsert(externId, [&](ExternIdState &state) {
-        state.numNodes = numNodes;
-        state.dataToEntry = dataToEntry;
-        state.isMissingName = isMissingName;
-      });
+                   bool isMissingName, const DataToEntryMap &dataToEntry,
+                   ExternIdState externIdState = {}) {
+      corrIdToExternId.emplace_back(correlationId, externId);
+      externIdState.numNodes = numNodes;
+      externIdState.dataToEntry = dataToEntry;
+      externIdState.isMissingName = isMissingName;
+      externIdToState.emplace_back(externId, std::move(externIdState));
     }
 
     template <typename FlushFnT>

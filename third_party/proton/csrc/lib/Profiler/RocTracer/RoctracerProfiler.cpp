@@ -91,8 +91,8 @@ convertActivityToMetric(const roctracer_record_t *activity) {
 }
 
 void processActivityKernel(
-    RoctracerProfiler::CorrIdToExternIdMap &corrIdToExternId,
-    RoctracerProfiler::ExternIdToStateMap &externIdToState,
+    RoctracerProfiler::CorrIdToExternIdStorage &corrIdToExternId,
+    RoctracerProfiler::ExternIdToStateStorage &externIdToState,
     ThreadSafeMap<uint64_t, bool, std::unordered_map<uint64_t, bool>>
         &corrIdToIsHipGraph,
     std::map<Data *, std::pair<size_t, size_t>> &dataPhases, size_t externId,
@@ -100,7 +100,10 @@ void processActivityKernel(
   if (externId == Scope::DummyScopeId)
     return;
   bool isGraph = corrIdToIsHipGraph.contain(activity->correlation_id);
-  auto &state = externIdToState[externId];
+  auto stateIter = externIdToState.find(externId);
+  if (stateIter == externIdToState.end())
+    return;
+  auto &state = stateIter->second;
   if (!isGraph) {
     for (auto [data, entry] : state.dataToEntry) {
       if (auto metric = convertActivityToMetric(activity)) {
@@ -142,8 +145,8 @@ void processActivityKernel(
 }
 
 void processActivity(
-    RoctracerProfiler::CorrIdToExternIdMap &corrIdToExternId,
-    RoctracerProfiler::ExternIdToStateMap &externIdToState,
+    RoctracerProfiler::CorrIdToExternIdStorage &corrIdToExternId,
+    RoctracerProfiler::ExternIdToStateStorage &externIdToState,
     ThreadSafeMap<uint64_t, bool, std::unordered_map<uint64_t, bool>>
         &corrIdToIsHipGraph,
     std::map<Data *, std::pair<size_t, size_t>> &dataPhases, size_t parentId,
@@ -266,6 +269,9 @@ struct RoctracerProfiler::RoctracerProfilerPimpl
                           const void *callbackData, void *arg);
   static void activityCallback(const char *begin, const char *end, void *arg);
 
+  void drainCorrelationBuffers();
+  void clearCorrelationMaps();
+
   ThreadSafeMap<uint64_t, bool, std::unordered_map<uint64_t, bool>>
       corrIdToIsHipGraph;
 
@@ -282,7 +288,28 @@ struct RoctracerProfiler::RoctracerProfilerPimpl
 
   ThreadSafeMap<hipStream_t, bool, std::unordered_map<hipStream_t, bool>>
       streamToCapture;
+
+  CorrIdToExternIdStorage corrIdToExternId;
+  ExternIdToStateStorage externIdToState;
 };
+
+void RoctracerProfiler::RoctracerProfilerPimpl::drainCorrelationBuffers() {
+  if (auto pending = profiler.correlation.corrIdToExternId.steal()) {
+    for (auto &[correlationId, externId] : *pending) {
+      corrIdToExternId.insert_or_assign(correlationId, externId);
+    }
+  }
+  if (auto pending = profiler.correlation.externIdToState.steal()) {
+    for (auto &[externId, state] : *pending) {
+      externIdToState.insert_or_assign(externId, std::move(state));
+    }
+  }
+}
+
+void RoctracerProfiler::RoctracerProfilerPimpl::clearCorrelationMaps() {
+  corrIdToExternId.clear();
+  externIdToState.clear();
+}
 
 void RoctracerProfiler::RoctracerProfilerPimpl::apiCallback(
     uint32_t domain, uint32_t cid, const void *callbackData, void *arg) {
@@ -409,6 +436,7 @@ void RoctracerProfiler::RoctracerProfilerPimpl::activityCallback(
   auto *pImpl = dynamic_cast<RoctracerProfiler::RoctracerProfilerPimpl *>(
       profiler.pImpl.get());
   auto &correlation = profiler.correlation;
+  pImpl->drainCorrelationBuffers();
 
   static thread_local std::map<Data *, size_t> dataFlushedPhases;
   const roctracer_record_t *record =
@@ -424,16 +452,18 @@ void RoctracerProfiler::RoctracerProfilerPimpl::activityCallback(
     maxCorrelationId =
         std::max<uint64_t>(maxCorrelationId, record->correlation_id);
     auto externId = Scope::DummyScopeId;
-    bool hasCorrelation = correlation.corrIdToExternId.withRead(
-        record->correlation_id, [&](const size_t &value) { externId = value; });
+    auto corrIdIter = pImpl->corrIdToExternId.find(record->correlation_id);
+    bool hasCorrelation = corrIdIter != pImpl->corrIdToExternId.end();
+    if (hasCorrelation)
+      externId = corrIdIter->second;
 
     if (hasCorrelation) {
       // Track correlation ids from the same stream and erase those <
       // correlationId
-      processActivity(correlation.corrIdToExternId, correlation.externIdToState,
+      processActivity(pImpl->corrIdToExternId, pImpl->externIdToState,
                       pImpl->corrIdToIsHipGraph, dataPhases, externId, record);
     } else {
-      correlation.corrIdToExternId.erase(record->correlation_id);
+      pImpl->corrIdToExternId.erase(record->correlation_id);
       pImpl->corrIdToIsHipGraph.erase(record->correlation_id);
     }
     roctracer::getNextRecord<true>(record, &record);
@@ -479,6 +509,8 @@ void RoctracerProfiler::RoctracerProfilerPimpl::doStop() {
   roctracer::disableDomainCallback<true>(ACTIVITY_DOMAIN_ROCTX);
   roctracer::disableDomainActivity<true>(ACTIVITY_DOMAIN_HIP_OPS);
   roctracer::closePool<true>();
+  profiler.correlation.clear();
+  clearCorrelationMaps();
 }
 
 RoctracerProfiler::RoctracerProfiler() {
