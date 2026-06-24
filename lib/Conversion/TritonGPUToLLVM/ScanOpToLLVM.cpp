@@ -1,7 +1,4 @@
 #include "ReduceScanCommon.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/IR/Matchers.h"
-#include "mlir/IR/TypeUtilities.h"
 #include "mlir/Support/LLVM.h"
 #include "triton/Analysis/Utility.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
@@ -17,69 +14,6 @@ using ::mlir::LLVM::delinearize;
 using ::mlir::LLVM::linearize;
 using ::mlir::triton::gpu::getTotalElemsPerThread;
 using ::mlir::triton::gpu::toLinearEncoding;
-
-// Boolean add-scan fast path: an `add` scan over a provably-{0,1} operand uses
-// inclusive[lane] = popcount(ballot(elem != 0) & groupMask) (ballot + ctpop),
-// not the O(log n) shuffle tree; anything not provably {0,1} falls back to the
-// generic scan. The {0,1} proof is a depth-bounded, conservative arith walk.
-static bool isProvablyZeroOrOne(Value value, unsigned depth = 6) {
-  Type elemTy = getElementTypeOrSelf(value.getType());
-  if (elemTy.isInteger(1))
-    return true; // i1 (incl. cmpi/cmpf results) is {0,1} by construction.
-  if (!isa<IntegerType>(elemTy) || depth == 0)
-    return false;
-  Operation *def = value.getDefiningOp();
-  if (!def)
-    return false;
-  if (matchPattern(def, m_Zero()) || matchPattern(def, m_One()))
-    return true;
-  auto rec = [&](Value v) { return isProvablyZeroOrOne(v, depth - 1); };
-  if (isa<arith::ExtUIOp, arith::TruncIOp>(def)) // zext/trunc preserve {0,1}
-    return rec(def->getOperand(0));
-  if (auto sext = dyn_cast<arith::ExtSIOp>(def)) // but extsi(i1) is {0,-1}
-    return !getElementTypeOrSelf(sext.getIn().getType()).isInteger(1) &&
-           rec(sext.getIn());
-  // `and` is {0,1} if either operand is (`x & 1`); or/xor/select need both.
-  if (auto andOp = dyn_cast<arith::AndIOp>(def))
-    return rec(andOp.getLhs()) || rec(andOp.getRhs());
-  if (isa<arith::OrIOp, arith::XOrIOp>(def))
-    return rec(def->getOperand(0)) && rec(def->getOperand(1));
-  if (auto sel = dyn_cast<arith::SelectOp>(def))
-    return rec(sel.getTrueValue()) && rec(sel.getFalseValue());
-  return false;
-}
-
-// True iff the combine region is a single integer add of the two block args.
-static bool isIntegerAddCombine(triton::ScanOp op) {
-  Region &region = op.getCombineOp();
-  if (!region.hasOneBlock())
-    return false;
-  Block &block = region.front();
-  auto ret = dyn_cast<triton::ScanReturnOp>(block.getTerminator());
-  if (block.getNumArguments() != 2 || !ret || ret->getNumOperands() != 1)
-    return false;
-  auto add = ret->getOperand(0).getDefiningOp<arith::AddIOp>();
-  if (!add)
-    return false;
-  Value a = block.getArgument(0), c = block.getArgument(1);
-  return (add.getLhs() == a && add.getRhs() == c) ||
-         (add.getLhs() == c && add.getRhs() == a);
-}
-
-// Decide whether the warp scan can use the ballot + popcount fast path; purely
-// structural, any false return falls back to the generic scan. Needs one axis
-// element per thread (a single 0/1 bit) on consecutive lanes (identity stride).
-static bool canUseBallotScan(triton::ScanOp op, ScanLoweringHelper &helper,
-                             unsigned iWarpSize) {
-  unsigned scanDim = helper.getAxisNumThreadsPerWarpWithUniqueData();
-  if (op.getNumOperands() != 1 || !isIntegerAddCombine(op) ||
-      !isProvablyZeroOrOne(op.getOperand(0)) ||
-      helper.getAxisNumElementsPerThread() != 1 ||
-      helper.getAxisThreadStride() != 1 || scanDim > iWarpSize)
-    return false;
-  // Reverse = flip(scan(flip)); the full-warp flip needs the warp as one group.
-  return !(op.getReverse() && scanDim != iWarpSize);
-}
 
 // apply combine region to acc and cur and accumulate it into acc
 static SmallVector<Value> accumulate(ScanLoweringHelper &helper,
@@ -114,52 +48,56 @@ scanThreadContiguousElements(SmallVector<SmallVector<Value>> &srcValues,
   }
 }
 
-// Warp inclusive add-scan of a 0/1 value via ballot + masked popcount; drop-in
-// for `warpScan` (identical per-lane values) where `canUseBallotScan` holds.
-static void warpScanBallot(SmallVector<SmallVector<Value>> &srcValues,
-                           ConversionPatternRewriter &rewriter,
-                           const TargetInfoBase &targetInfo,
-                           ScanLoweringHelper &helper, Value laneId,
-                           Value laneIdAxis, unsigned iWarpSize) {
-  Location loc = helper.getLoc();
-  auto b = TritonLLVMOpBuilder(loc, rewriter);
-  Type ballotTy = rewriter.getIntegerType(iWarpSize);
-
-  // Shift amounts are i32; widen to the ballot width (i64 on wave64).
-  auto toWidth = [&](Value v) {
-    return iWarpSize == 32 ? v : b.zext(ballotTy, v);
-  };
-  // Inclusive group mask [groupStart, laneId]: shifts of ~0 cut both ends.
-  Value allOnes = b.int_val(iWarpSize, -1);
-  Value laneMask =
-      b.lshr(allOnes, toWidth(b.sub(b.i32_val(iWarpSize - 1), laneId)));
-  if (helper.getAxisNumThreadsPerWarpWithUniqueData() != iWarpSize)
-    laneMask =
-        b.and_(laneMask, b.shl(allOnes, toWidth(b.sub(laneId, laneIdAxis))));
-
-  // One axis element per thread, so each srcValue is an independent scan group.
-  for (SmallVector<Value> &chunk : srcValues) {
-    auto elemTy = cast<IntegerType>(chunk.front().getType());
-    Value pred = b.icmp_ne(chunk.front(), b.int_val(elemTy.getWidth(), 0));
-    Value mask = targetInfo.ballot(rewriter, loc, ballotTy, pred);
-    Value cnt =
-        LLVM::CtPopOp::create(rewriter, loc, ballotTy, b.and_(mask, laneMask));
-    if (elemTy.getWidth() < iWarpSize)
-      cnt = b.trunc(elemTy, cnt);
-    else if (elemTy.getWidth() > iWarpSize)
-      cnt = b.zext(elemTy, cnt);
-    chunk.front() = cnt;
-  }
-}
-
 // Apply a scan across threads of the warp for the last element of each
 // contiguous group of elements.
+//
+// Boolean {0,1} add-scan fast path: when the combiner is an integer add, the
+// operand is provably {0,1}, and the axis maps 1:1 onto adjacent lanes (one
+// element per thread, unit thread stride), the within-warp inclusive scan is
+// just inclusive[lane] = popcount(ballot(elem != 0) & groupMask) -- a ballot
+// plus a masked popcount, instead of the O(log n) shuffle tree below. Reverse
+// is handled upstream by the flip(scan(flip)) wrapper in emitFastScan, so this
+// only ever sees a forward scan over the (possibly flipped) data.
 static void warpScan(SmallVector<SmallVector<Value>> &srcValues,
                      ConversionPatternRewriter &rewriter,
                      const TargetInfoBase &targetInfo,
-                     ScanLoweringHelper &helper, Value laneIdAxis) {
+                     ScanLoweringHelper &helper, Value laneId, Value laneIdAxis,
+                     unsigned iWarpSize) {
   Location loc = helper.getLoc();
   auto b = TritonLLVMOpBuilder(loc, rewriter);
+
+  if (helper.isIntegerAddCombine() && helper.isProvablyZeroOrOne() &&
+      helper.getAxisNumElementsPerThread() == 1 &&
+      helper.getAxisThreadStride() == 1) {
+    Type ballotTy = rewriter.getIntegerType(iWarpSize);
+    // Shift amounts are i32; widen to the ballot width (i64 on wave64).
+    auto toWidth = [&](Value v) {
+      return iWarpSize == 32 ? v : b.zext(ballotTy, v);
+    };
+    // Inclusive group mask [groupStart, laneId]: shifts of ~0 cut both ends.
+    Value allOnes = b.int_val(iWarpSize, -1);
+    Value laneMask =
+        b.lshr(allOnes, toWidth(b.sub(b.i32_val(iWarpSize - 1), laneId)));
+    if (helper.getAxisNumThreadsPerWarpWithUniqueData() != iWarpSize)
+      laneMask =
+          b.and_(laneMask, b.shl(allOnes, toWidth(b.sub(laneId, laneIdAxis))));
+
+    // One axis element per thread, so each srcValue is an independent group.
+    for (SmallVector<Value> &chunk : srcValues) {
+      auto elemTy = cast<IntegerType>(chunk.front().getType());
+      Value pred = b.icmp_ne(chunk.front(), b.int_val(elemTy.getWidth(), 0));
+      Value mask = targetInfo.ballot(rewriter, loc, ballotTy, pred);
+      Value cnt = LLVM::CtPopOp::create(rewriter, loc, ballotTy,
+                                        b.and_(mask, laneMask));
+      if (elemTy.getWidth() < iWarpSize)
+        cnt = b.trunc(elemTy, cnt);
+      else if (elemTy.getWidth() > iWarpSize)
+        cnt = b.zext(elemTy, cnt);
+      chunk.front() = cnt;
+    }
+    return;
+  }
+
   unsigned scanElementsPerThreads = helper.getAxisNumElementsPerThread();
   unsigned elementStride = helper.getAxisElementStride();
   unsigned threadStride = helper.getAxisThreadStride();
@@ -600,12 +538,10 @@ ScanOpConversion::emitFastScan(triton::ScanOp op, triton::ScanOpAdaptor adaptor,
   // Scan contiguous elements in a thread and update `srcValues`.
   scanThreadContiguousElements(srcValues, rewriter, helper);
   // Apply warp level scan to the last element of each chunk of contiguous
-  // elements.
-  if (canUseBallotScan(op, helper, iWarpSize))
-    warpScanBallot(srcValues, rewriter, targetInfo, helper, laneId, laneIdAxis,
-                   iWarpSize);
-  else
-    warpScan(srcValues, rewriter, targetInfo, helper, laneIdAxis);
+  // elements (ballot + popcount fast path for boolean add-scans, else the
+  // generic shuffle tree).
+  warpScan(srcValues, rewriter, targetInfo, helper, laneId, laneIdAxis,
+           iWarpSize);
 
   if (axisNumWarps > 1) {
     // Slow path for the case where there are multiple warps with unique data on

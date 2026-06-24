@@ -4,7 +4,11 @@
 // (llvm.intr.ctpop); anything not provably {0,1} keeps the generic shuffle scan
 // (no ctpop). Path selection is purely structural -- a function of the operand's
 // producer chain and the combine op -- so the cases are distinguished by their
-// input IR alone, with no runtime toggle.
+// input IR alone, with no runtime toggle. The {0,1} proof accepts only the
+// producers measured to actually fire on real (repo + inductor) kernels: i1, 0/1
+// constants, extui/trunci, `and` (the `x & 1` mask), `select` (the
+// `tl.where(c,1,0)` idiom), and a convert_layout passthrough (covered in
+// scan_ballot_passthrough_to_llvm.mlir).
 
 #l32 = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
 
@@ -37,24 +41,7 @@ tt.func private @bool_and_mask(%arg0: tensor<32xi32, #l32>) -> tensor<32xi32, #l
   tt.return %0 : tensor<32xi32, #l32>
 }
 
-// A narrow (i8) boolean upcast for the scan uses `extsi` (narrow ints are
-// signed). `extsi` of a proven-{0,1} value wider than i1 keeps it {0,1}, so this
-// must still fire -- regression guard for the int8/int16 path.
-// CHECK-LABEL: @bool_extsi_narrow
-// CHECK: llvm.intr.ctpop
-tt.func private @bool_extsi_narrow(%arg0: tensor<32xi8, #l32>) -> tensor<32xi32, #l32> {
-  %c1 = arith.constant dense<1> : tensor<32xi8, #l32>
-  %m = arith.andi %arg0, %c1 : tensor<32xi8, #l32>
-  %b = arith.extsi %m : tensor<32xi8, #l32> to tensor<32xi32, #l32>
-  %0 = "tt.scan"(%b) <{axis = 0 : i32, reverse = false}> ({
-  ^bb0(%a: i32, %c: i32):
-    %1 = arith.addi %a, %c : i32
-    tt.scan.return %1 : i32
-  }) : (tensor<32xi32, #l32>) -> tensor<32xi32, #l32>
-  tt.return %0 : tensor<32xi32, #l32>
-}
-
-// `select` between {0,1} arms is {0,1}.
+// `select` between {0,1} arms is {0,1} (the `tl.where(c, 1, 0)` idiom).
 // CHECK-LABEL: @bool_select
 // CHECK: llvm.intr.ctpop
 tt.func private @bool_select(%cond: tensor<32xi1, #l32>) -> tensor<32xi32, #l32> {
@@ -69,11 +56,29 @@ tt.func private @bool_select(%cond: tensor<32xi1, #l32>) -> tensor<32xi32, #l32>
   tt.return %0 : tensor<32xi32, #l32>
 }
 
-// MISCOMPILE TRAP: `extsi` of an i1 yields {0,-1} (the i1 "1" sign-extends to
-// all-ones), NOT {0,1}, so the fast path must NOT fire here.
-// CHECK-LABEL: @not_bool_extsi_i1
+// A reverse boolean add-scan still fires: the reverse direction is handled by
+// the flip(scan(flip)) wrapper in emitFastScan, so warpScanBallot runs a forward
+// scan over the flipped data and the ballot fast path applies (the old
+// !getReverse() gate was over-conservative).
+// CHECK-LABEL: @bool_reverse
+// CHECK: llvm.intr.ctpop
+tt.func private @bool_reverse(%arg0: tensor<32xi1, #l32>) -> tensor<32xi32, #l32> {
+  %b = arith.extui %arg0 : tensor<32xi1, #l32> to tensor<32xi32, #l32>
+  %0 = "tt.scan"(%b) <{axis = 0 : i32, reverse = true}> ({
+  ^bb0(%a: i32, %c: i32):
+    %1 = arith.addi %a, %c : i32
+    tt.scan.return %1 : i32
+  }) : (tensor<32xi32, #l32>) -> tensor<32xi32, #l32>
+  tt.return %0 : tensor<32xi32, #l32>
+}
+
+// extsi is intentionally NOT a supported producer: it has zero measured
+// real-world incidence, and extsi(i1) is the {0,-1} miscompile trap (an i1
+// "true" sign-extends to all-ones, not 1). So even an extsi of an otherwise
+// proven-{0,1} value must NOT fire -- it falls back to the generic scan.
+// CHECK-LABEL: @not_bool_extsi
 // CHECK-NOT: llvm.intr.ctpop
-tt.func private @not_bool_extsi_i1(%arg0: tensor<32xi1, #l32>) -> tensor<32xi32, #l32> {
+tt.func private @not_bool_extsi(%arg0: tensor<32xi1, #l32>) -> tensor<32xi32, #l32> {
   %b = arith.extsi %arg0 : tensor<32xi1, #l32> to tensor<32xi32, #l32>
   %0 = "tt.scan"(%b) <{axis = 0 : i32, reverse = false}> ({
   ^bb0(%a: i32, %c: i32):
@@ -98,18 +103,16 @@ tt.func private @generic_scan(%arg0: tensor<32xi32, #l32>) -> tensor<32xi32, #l3
 
 // Keep the test functions from being DCE'd (mirrors scan_to_llvm.mlir).
 tt.func public @anchor(%ptr: !llvm.ptr,
-                       %ai1: !llvm.struct<(i1)>, %ai8: !llvm.struct<(i8)>,
-                       %ai32: !llvm.struct<(i32)>) {
+                       %ai1: !llvm.struct<(i1)>, %ai32: !llvm.struct<(i32)>) {
   %i1 = builtin.unrealized_conversion_cast %ai1 : !llvm.struct<(i1)> to tensor<32xi1, #l32>
-  %i8 = builtin.unrealized_conversion_cast %ai8 : !llvm.struct<(i8)> to tensor<32xi8, #l32>
   %i32 = builtin.unrealized_conversion_cast %ai32 : !llvm.struct<(i32)> to tensor<32xi32, #l32>
 
   %r0 = tt.call @bool_extui(%i1) : (tensor<32xi1, #l32>) -> tensor<32xi32, #l32>
   %r1 = tt.call @bool_and_mask(%i32) : (tensor<32xi32, #l32>) -> tensor<32xi32, #l32>
-  %r2 = tt.call @bool_extsi_narrow(%i8) : (tensor<32xi8, #l32>) -> tensor<32xi32, #l32>
-  %r3 = tt.call @bool_select(%i1) : (tensor<32xi1, #l32>) -> tensor<32xi32, #l32>
-  %r4 = tt.call @not_bool_extsi_i1(%i1) : (tensor<32xi1, #l32>) -> tensor<32xi32, #l32>
-  %r5 = tt.call @generic_scan(%i32) : (tensor<32xi32, #l32>) -> tensor<32xi32, #l32>
+  %r2 = tt.call @bool_select(%i1) : (tensor<32xi1, #l32>) -> tensor<32xi32, #l32>
+  %r3 = tt.call @not_bool_extsi(%i1) : (tensor<32xi1, #l32>) -> tensor<32xi32, #l32>
+  %r4 = tt.call @generic_scan(%i32) : (tensor<32xi32, #l32>) -> tensor<32xi32, #l32>
+  %r5 = tt.call @bool_reverse(%i1) : (tensor<32xi1, #l32>) -> tensor<32xi32, #l32>
 
   %s0 = builtin.unrealized_conversion_cast %r0 : tensor<32xi32, #l32> to !llvm.struct<(i32)>
   llvm.store volatile %s0, %ptr : !llvm.struct<(i32)>, !llvm.ptr
