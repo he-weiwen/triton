@@ -6,9 +6,10 @@
 // producer chain and the combine op -- so the cases are distinguished by their
 // input IR alone, with no runtime toggle. The {0,1} proof accepts only the
 // producers measured to actually fire on real (repo + inductor) kernels: i1, 0/1
-// constants, extui/trunci, `and` (the `x & 1` mask), `select` (the
-// `tl.where(c,1,0)` idiom), and a convert_layout passthrough (covered in
-// scan_ballot_passthrough_to_llvm.mlir).
+// constants, extui/trunci, `and` (the `x & 1` mask), and `select` (the
+// `tl.where(c,1,0)` idiom). Data-movement ops (convert_layout/splat/broadcast/
+// reshape/...) are intentionally NOT looked through, so a scan fed through one
+// keeps the generic shuffle scan.
 
 #l32 = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
 
@@ -72,6 +73,34 @@ tt.func private @bool_reverse(%arg0: tensor<32xi1, #l32>) -> tensor<32xi32, #l32
   tt.return %0 : tensor<32xi32, #l32>
 }
 
+// Element width is not gated: the popcount is computed in i32 and zext'd up to
+// the (wider) element type. i64 is the width TorchInductor's add-scans use.
+// CHECK-LABEL: @bool_extui_i64
+// CHECK: llvm.intr.ctpop
+tt.func private @bool_extui_i64(%arg0: tensor<32xi1, #l32>) -> tensor<32xi64, #l32> {
+  %b = arith.extui %arg0 : tensor<32xi1, #l32> to tensor<32xi64, #l32>
+  %0 = "tt.scan"(%b) <{axis = 0 : i32, reverse = false}> ({
+  ^bb0(%a: i64, %c: i64):
+    %1 = arith.addi %a, %c : i64
+    tt.scan.return %1 : i64
+  }) : (tensor<32xi64, #l32>) -> tensor<32xi64, #l32>
+  tt.return %0 : tensor<32xi64, #l32>
+}
+
+// Narrow width: the i32 popcount is trunc'd to the element type. For i1, trunc
+// yields count mod 2 -- which is exactly the i1 add-scan's wraparound, so the
+// fast path is still correct.
+// CHECK-LABEL: @bool_i1
+// CHECK: llvm.intr.ctpop
+tt.func private @bool_i1(%arg0: tensor<32xi1, #l32>) -> tensor<32xi1, #l32> {
+  %0 = "tt.scan"(%arg0) <{axis = 0 : i32, reverse = false}> ({
+  ^bb0(%a: i1, %c: i1):
+    %1 = arith.addi %a, %c : i1
+    tt.scan.return %1 : i1
+  }) : (tensor<32xi1, #l32>) -> tensor<32xi1, #l32>
+  tt.return %0 : tensor<32xi1, #l32>
+}
+
 // extsi is intentionally NOT a supported producer: it has zero measured
 // real-world incidence, and extsi(i1) is the {0,-1} miscompile trap (an i1
 // "true" sign-extends to all-ones, not 1). So even an extsi of an otherwise
@@ -113,6 +142,8 @@ tt.func public @anchor(%ptr: !llvm.ptr,
   %r3 = tt.call @not_bool_extsi(%i1) : (tensor<32xi1, #l32>) -> tensor<32xi32, #l32>
   %r4 = tt.call @generic_scan(%i32) : (tensor<32xi32, #l32>) -> tensor<32xi32, #l32>
   %r5 = tt.call @bool_reverse(%i1) : (tensor<32xi1, #l32>) -> tensor<32xi32, #l32>
+  %r6 = tt.call @bool_extui_i64(%i1) : (tensor<32xi1, #l32>) -> tensor<32xi64, #l32>
+  %r7 = tt.call @bool_i1(%i1) : (tensor<32xi1, #l32>) -> tensor<32xi1, #l32>
 
   %s0 = builtin.unrealized_conversion_cast %r0 : tensor<32xi32, #l32> to !llvm.struct<(i32)>
   llvm.store volatile %s0, %ptr : !llvm.struct<(i32)>, !llvm.ptr
@@ -126,6 +157,10 @@ tt.func public @anchor(%ptr: !llvm.ptr,
   llvm.store volatile %s4, %ptr : !llvm.struct<(i32)>, !llvm.ptr
   %s5 = builtin.unrealized_conversion_cast %r5 : tensor<32xi32, #l32> to !llvm.struct<(i32)>
   llvm.store volatile %s5, %ptr : !llvm.struct<(i32)>, !llvm.ptr
+  %s6 = builtin.unrealized_conversion_cast %r6 : tensor<32xi64, #l32> to !llvm.struct<(i64)>
+  llvm.store volatile %s6, %ptr : !llvm.struct<(i64)>, !llvm.ptr
+  %s7 = builtin.unrealized_conversion_cast %r7 : tensor<32xi1, #l32> to !llvm.struct<(i1)>
+  llvm.store volatile %s7, %ptr : !llvm.struct<(i1)>, !llvm.ptr
   tt.return
 }
 

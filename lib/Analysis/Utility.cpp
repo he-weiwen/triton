@@ -479,68 +479,38 @@ unsigned ScanLoweringHelper::getNonAxisNumElementsPerThread() {
 Region &ScanLoweringHelper::getCombineOp() { return scanOp.getCombineOp(); }
 
 // Depth-bounded conservative proof that `value` is in {0, 1}, walking up its
-// producer chain. Backs ScanLoweringHelper::isProvablyZeroOrOne().
+// producer chain.
 static bool isValueProvablyZeroOrOne(Value value, unsigned depth = 6) {
-  // An i1 is {0,1} by construction -- this covers comparisons (cmpi/cmpf) and
-  // any other boolean SSA value, whatever produced it.
-  Type elemTy = getElementTypeOrSelf(value.getType());
-  if (elemTy.isInteger(1))
-    return true;
-  // Past i1 we can only reason about (non-i1) integers, only `depth` levels up
-  // the producer chain, and only when there is a producer op to inspect.
+  auto VT = getElementTypeOrSelf(value);
   Operation *def = value.getDefiningOp();
-  if (!isa<IntegerType>(elemTy) || depth == 0 || !def)
-    return false;
-  // A 0/1 literal (scalar or splat) is {0,1} outright.
-  if (matchPattern(def, m_Zero()) || matchPattern(def, m_One()))
+  if (VT.isInteger(1) ||
+      (def && (matchPattern(def, m_Zero()) || matchPattern(def, m_One()))))
     return true;
-
-  // Otherwise the producer must carry {0,1}-ness through from its operands.
+  if (!VT.isInteger() || depth == 0 || !def)
+    return false;
   auto rec = [&](Value v) { return isValueProvablyZeroOrOne(v, depth - 1); };
   return llvm::TypeSwitch<Operation *, bool>(def)
-      // Width casts: zero-extend and truncate always preserve {0,1}. Sign-extend
-      // is intentionally NOT handled: it never appears on a real boolean scan
-      // operand (measured across repo + inductor kernels), and extsi(i1) is the
-      // all-ones trap -- an i1 "true" sign-extends to -1, not 1.
       .Case<arith::ExtUIOp, arith::TruncIOp>(
           [&](auto cast) { return rec(cast.getIn()); })
-      // `and` stays in {0,1} if EITHER operand does -- bitwise-and bounds the
-      // result by the {0,1} side (the `x & 1` masking idiom).
       .Case([&](arith::AndIOp andOp) {
         return rec(andOp.getLhs()) || rec(andOp.getRhs());
       })
-      // `select` between {0,1} arms is {0,1} (the `tl.where(c, 1, 0)` idiom).
       .Case([&](arith::SelectOp sel) {
         return rec(sel.getTrueValue()) && rec(sel.getFalseValue());
       })
-      // Data-movement passthrough: convert_layout only relayouts its operand --
-      // never computes -- and carries SameOperandsAndResultElementType, so the
-      // element type (hence bit width) is unchanged and each result element is a
-      // verbatim copy of a source element; {0,1}-ness passes straight through, so
-      // recurse into `src`. Only convert_layout is handled: the other movement
-      // ops (splat/broadcast/expand_dims/reshape/trans) fold away before lowering
-      // or never reach a real scan operand, whereas a genuine relayout can
-      // legitimately survive directly on the scan operand at TTGIR->LLVM time
-      // (convert folding is suppressed at that boundary), so it must be looked
-      // through. (tt.bitcast is excluded -- it preserves bit width but
-      // reinterprets the bits, changing the value.)
-      .Case([&](triton::gpu::ConvertLayoutOp op) { return rec(op.getSrc()); })
       .Default(false);
 }
 
-bool ScanLoweringHelper::isIntegerAddCombine() {
+bool ScanLoweringHelper::isSingleBooleanAddScan() {
+  if (getNumOperands() != 1)
+    return false;
   Block &block = getCombineOp().front();
   Value arg0 = block.getArgument(0), arg1 = block.getArgument(1);
   Value ret = block.getTerminator()->getOperand(0);
-  auto matchAdd = [&](Value lhs, Value rhs) {
-    return matchPattern(
-        ret, m_Op<arith::AddIOp>(matchers::m_Val(lhs), matchers::m_Val(rhs)));
-  };
-  return matchAdd(arg0, arg1) || matchAdd(arg1, arg0);
-}
-
-bool ScanLoweringHelper::isProvablyZeroOrOne() {
-  return isValueProvablyZeroOrOne(scanOp.getOperand(0));
+  auto add = ret.getDefiningOp<arith::AddIOp>();
+  bool isSimpleAdd = add && ((add.getLhs() == arg0 && add.getRhs() == arg1) ||
+                             (add.getLhs() == arg1 && add.getRhs() == arg0));
+  return isSimpleAdd && isValueProvablyZeroOrOne(scanOp->getOperand(0));
 }
 
 unsigned ScanLoweringHelper::getAxisNumThreadsPerWarpWithUniqueData() {

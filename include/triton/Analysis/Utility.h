@@ -116,14 +116,10 @@ public:
   explicit ScanLoweringHelper(triton::ScanOp op);
   // Return true if the lowering of the scan op is supported.
   bool isSupported();
-  // Return true iff the combine region is a single integer add of its two
-  // block arguments (the combiner of a boolean add-scan).
-  bool isIntegerAddCombine();
-  // Return true iff the scan's input operand is provably in {0, 1}, via a
-  // depth-bounded conservative walk of its producer chain. Together with
-  // isIntegerAddCombine() this selects the ballot + popcount scan lowering.
-  bool isProvablyZeroOrOne();
-  // Return the number of elements per thread along axis dim.
+  // Return true iff the scan has a single integer operand known to take
+  // value in {0, 1}, and the combine region is an integer add of the two
+  // block arguments.
+  bool isSingleBooleanAddScan();
   unsigned getAxisNumElementsPerThread();
   // Return the number of elements per thread along non-axis dims.
   unsigned getNonAxisNumElementsPerThread();

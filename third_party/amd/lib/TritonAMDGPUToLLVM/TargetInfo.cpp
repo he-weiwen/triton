@@ -186,6 +186,31 @@ StringRef TargetInfo::getAtomicSyncScope(MemSyncScope scope) const {
   llvm_unreachable("unknown memory synchronization scope");
 }
 
+Value TargetInfo::warpInclusivePrefixPopcount(RewriterBase &rewriter,
+                                              Location loc, Value pred) const {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  // AMD has a hardware prefix-popcount: mbcnt counts the set ballot bits in the
+  // lanes strictly below this one (exclusive). mbcnt_lo covers the low 32 lanes;
+  // on wave64 we chain mbcnt_hi for the high 32. Add this lane's own predicate
+  // bit to turn the exclusive count into the inclusive prefix.
+  int warpSize = getWarpSize();
+  Value mask = ballot(rewriter, loc, int_ty(warpSize), pred);
+  Value excl;
+  if (warpSize > 32) {
+    Value maskLo = b.trunc(i32_ty, mask);
+    Value maskHi = b.trunc(i32_ty, b.lshr(mask, b.i64_val(32)));
+    Value lo = ROCDL::MbcntLoOp::create(rewriter, loc, i32_ty, maskLo,
+                                        b.i32_val(0), /*arg_attrs=*/{},
+                                        /*res_attrs=*/{});
+    excl = ROCDL::MbcntHiOp::create(rewriter, loc, i32_ty, maskHi, lo,
+                                    /*arg_attrs=*/{}, /*res_attrs=*/{});
+  } else {
+    excl = ROCDL::MbcntLoOp::create(rewriter, loc, i32_ty, mask, b.i32_val(0),
+                                    /*arg_attrs=*/{}, /*res_attrs=*/{});
+  }
+  return b.add(excl, b.zext(i32_ty, pred));
+}
+
 void TargetInfo::barrier(Location loc, RewriterBase &rewriter,
                          triton::gpu::AddrSpace targets) const {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
