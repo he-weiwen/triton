@@ -478,17 +478,18 @@ unsigned ScanLoweringHelper::getNonAxisNumElementsPerThread() {
 
 Region &ScanLoweringHelper::getCombineOp() { return scanOp.getCombineOp(); }
 
-// Depth-bounded conservative proof that `value` is in {0, 1}, walking up its
-// producer chain.
-static bool isValueProvablyZeroOrOne(Value value, unsigned depth = 6) {
-  auto VT = getElementTypeOrSelf(value);
+// Depth-bounded recursive proof that `value` is in {0, 1}, walking up its
+// producer chain. Covers only realistic & reachable scenarios for boolean mask
+// creation/manipulations.
+static bool isKnownZeroOrOne(Value value, unsigned depth = 6) {
+  auto elemTy = getElementTypeOrSelf(value);
   Operation *def = value.getDefiningOp();
-  if (VT.isInteger(1) ||
+  if (elemTy.isInteger(1) ||
       (def && (matchPattern(def, m_Zero()) || matchPattern(def, m_One()))))
     return true;
-  if (!VT.isInteger() || depth == 0 || !def)
+  if (!elemTy.isInteger() || depth == 0 || !def)
     return false;
-  auto rec = [&](Value v) { return isValueProvablyZeroOrOne(v, depth - 1); };
+  auto rec = [&](Value v) { return isKnownZeroOrOne(v, depth - 1); };
   return llvm::TypeSwitch<Operation *, bool>(def)
       .Case<arith::ExtUIOp, arith::TruncIOp>(
           [&](auto cast) { return rec(cast.getIn()); })
@@ -498,6 +499,10 @@ static bool isValueProvablyZeroOrOne(Value value, unsigned depth = 6) {
       .Case([&](arith::SelectOp sel) {
         return rec(sel.getTrueValue()) && rec(sel.getFalseValue());
       })
+      // Unary shape/layout manipulations that preserves value
+      .Case<triton::SplatOp, triton::BroadcastOp, triton::ExpandDimsOp,
+            triton::ReshapeOp, triton::TransOp, triton::gpu::ConvertLayoutOp>(
+          [&](auto view) { return rec(view.getSrc()); })
       .Default(false);
 }
 
@@ -510,7 +515,7 @@ bool ScanLoweringHelper::isSingleBooleanAddScan() {
   auto add = ret.getDefiningOp<arith::AddIOp>();
   bool isSimpleAdd = add && ((add.getLhs() == arg0 && add.getRhs() == arg1) ||
                              (add.getLhs() == arg1 && add.getRhs() == arg0));
-  return isSimpleAdd && isValueProvablyZeroOrOne(scanOp->getOperand(0));
+  return isSimpleAdd && isKnownZeroOrOne(scanOp->getOperand(0));
 }
 
 unsigned ScanLoweringHelper::getAxisNumThreadsPerWarpWithUniqueData() {

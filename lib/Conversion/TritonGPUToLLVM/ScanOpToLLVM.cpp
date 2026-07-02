@@ -49,9 +49,7 @@ scanThreadContiguousElements(SmallVector<SmallVector<Value>> &srcValues,
 }
 
 // Apply a scan across threads of the warp for the last element of each
-// contiguous group of elements. A boolean {0,1} integer add-scan takes a
-// ballot + popcount fast path (see below); every other scan uses the shuffle
-// tree.
+// contiguous group of elements.
 static void warpScan(SmallVector<SmallVector<Value>> &srcValues,
                      ConversionPatternRewriter &rewriter,
                      const TargetInfoBase &targetInfo,
@@ -67,16 +65,18 @@ static void warpScan(SmallVector<SmallVector<Value>> &srcValues,
   if (scanElementsPerThreads == 1 && threadStride == 1 &&
       scanDim == iWarpSize && (iWarpSize == 32 || iWarpSize == 64) &&
       helper.isSingleBooleanAddScan()) {
-    // The within-warp inclusive prefix sum of a boolean {0,1} value is the
-    // inclusive prefix popcount of the warp ballot. The target picks the
-    // instruction sequence (NVIDIA: ballot + masked ctpop; AMD: ballot +
-    // mbcnt); here we just feed it the per-lane bit and adapt the i32 count to
-    // the element type.
+    // Fast path for boolean add scan, assuming full warp participation
+    // and 1 contiguous element per thread.
+    // Example (warpsize = 4):
+    //    starting bit:   [1],   [0],    [1],    [1]
+    //    ballot:         [1***],[10**], [101*], [1011]
+    //    popcnt:         [1],   [1],    [2],    [3]
     auto elemTy = cast<IntegerType>(helper.getElementTypes()[0]);
     unsigned width = elemTy.getWidth();
     for (SmallVector<Value> &elem : srcValues) {
       Value bit = b.icmp_ne(elem.front(), b.int_val(width, 0));
-      Value cnt = targetInfo.warpInclusivePrefixPopcount(rewriter, loc, bit);
+      // NVIDIA: lane-masked ballot + popc, AMD: ballot + mbcnt
+      Value cnt = targetInfo.warpPrefixPopcount(rewriter, loc, bit);
       if (width < 32)
         cnt = b.trunc(elemTy, cnt);
       else if (width > 32)

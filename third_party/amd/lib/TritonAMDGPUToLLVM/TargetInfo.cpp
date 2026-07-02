@@ -186,17 +186,19 @@ StringRef TargetInfo::getAtomicSyncScope(MemSyncScope scope) const {
   llvm_unreachable("unknown memory synchronization scope");
 }
 
-Value TargetInfo::warpInclusivePrefixPopcount(RewriterBase &rewriter,
-                                              Location loc, Value pred) const {
+Value TargetInfo::warpPrefixPopcount(RewriterBase &rewriter, Location loc,
+                                     Value pred) const {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
-  // AMD has a hardware prefix-popcount: mbcnt counts the set ballot bits in the
-  // lanes strictly below this one (exclusive). mbcnt_lo covers the low 32 lanes;
-  // on wave64 we chain mbcnt_hi for the high 32. Add this lane's own predicate
-  // bit to turn the exclusive count into the inclusive prefix.
-  int warpSize = getWarpSize();
-  Value mask = ballot(rewriter, loc, int_ty(warpSize), pred);
+  // Compute an inclusive prefix popcount by computing an exclusive prefix
+  // popcount with mbcnt, then adding back the lane's own predicate bit.
   Value excl;
-  if (warpSize > 32) {
+  if (getWarpSize() == 32) {
+    Value mask = ballot(rewriter, loc, i32_ty, pred);
+    excl = ROCDL::MbcntLoOp::create(rewriter, loc, i32_ty, mask, b.i32_val(0),
+                                    /*arg_attrs=*/{}, /*res_attrs=*/{});
+  } else if (getWarpSize() == 64) {
+    // mbcnt_lo over the low 32 lanes, chained into mbcnt_hi for the high 32.
+    Value mask = ballot(rewriter, loc, i64_ty, pred);
     Value maskLo = b.trunc(i32_ty, mask);
     Value maskHi = b.trunc(i32_ty, b.lshr(mask, b.i64_val(32)));
     Value lo = ROCDL::MbcntLoOp::create(rewriter, loc, i32_ty, maskLo,
@@ -205,8 +207,7 @@ Value TargetInfo::warpInclusivePrefixPopcount(RewriterBase &rewriter,
     excl = ROCDL::MbcntHiOp::create(rewriter, loc, i32_ty, maskHi, lo,
                                     /*arg_attrs=*/{}, /*res_attrs=*/{});
   } else {
-    excl = ROCDL::MbcntLoOp::create(rewriter, loc, i32_ty, mask, b.i32_val(0),
-                                    /*arg_attrs=*/{}, /*res_attrs=*/{});
+    llvm_unreachable("AMD warp size must be 32 or 64");
   }
   return b.add(excl, b.zext(i32_ty, pred));
 }

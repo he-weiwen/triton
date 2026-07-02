@@ -77,14 +77,8 @@ public:
                           SmallVector<Value> &acc, triton::ReduceOp op,
                           unsigned reduceLaneIdMask) const = 0;
 
-  // Inclusive prefix popcount of a per-lane boolean predicate across the warp:
-  // returns, for each lane, the number of lanes l <= laneId (inclusive) whose
-  // |pred| is true. The result is i32 (the caller adapts it to the element
-  // type). This is the warp-collective primitive for a boolean {0,1} add-scan;
-  // NVIDIA lowers it to ballot + a lane-masked llvm.intr.ctpop, AMD to
-  // ballot + mbcnt.
-  virtual Value warpInclusivePrefixPopcount(RewriterBase &rewriter, Location loc,
-                                            Value pred) const = 0;
+  virtual Value warpPrefixPopcount(RewriterBase &rewriter, Location loc,
+                                   Value pred) const = 0;
 
   virtual std::string getMulhiFuncName(Type resultElementTy) const = 0;
   // Emits LLVM code with |rewriter| to print a message following the given

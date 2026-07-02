@@ -165,21 +165,15 @@ StringRef TargetInfo::getAtomicSyncScope(MemSyncScope scope) const {
   llvm_unreachable("unknown memory synchronization scope");
 }
 
-Value TargetInfo::warpInclusivePrefixPopcount(RewriterBase &rewriter,
-                                              Location loc, Value pred) const {
+Value TargetInfo::warpPrefixPopcount(RewriterBase &rewriter, Location loc,
+                                     Value pred) const {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
-  // NVIDIA warps are always 32 lanes and there is no hardware prefix-popcount,
-  // so the idiomatic lowering is ballot + a lane-masked llvm.intr.ctpop.
-  // Build the lane mask before the ballot: when this primitive is called inside
-  // a multi-element scan loop, the mask is loop-invariant and CSE hoists it to a
-  // single copy ahead of the per-element ballots -- matching the pre-refactor
-  // inline lowering byte-for-byte.
-  Type i32ty = rewriter.getI32Type();
   // Inclusive lane mask selecting lanes [0, laneId]: (-1) >> (31 - laneId).
   Value laneId = getLaneId(rewriter, loc);
   Value laneMask = b.lshr(b.i32_val(-1), b.sub(b.i32_val(31), laneId));
-  Value warpBits = ballot(rewriter, loc, i32ty, pred);
-  return LLVM::CtPopOp::create(rewriter, loc, i32ty, b.and_(warpBits, laneMask));
+  Value warpBits = ballot(rewriter, loc, i32_ty, pred);
+  return LLVM::CtPopOp::create(rewriter, loc, i32_ty,
+                               b.and_(warpBits, laneMask));
 }
 
 void TargetInfo::barrier(Location loc, RewriterBase &rewriter,
