@@ -40,6 +40,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
 // -----
 
 #call_blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [2, 2], order = [1, 0], CGALayout = [[1, 0]]}>
+#call_dst = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [4, 1], order = [1, 0], CGALayout = [[1, 0]]}>
 #call_shared = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [0], CGALayout = [[1]]}>
 #call_smem = #ttg.shared_memory
 #call_load_blocked = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [4], order = [0], CGALayout = [[1]]}>
@@ -53,12 +54,12 @@ module attributes {"ttg.num-ctas" = 2 : i32, "ttg.num-warps" = 4 : i32, "ttg.thr
   // shared-memory frame. The callee body itself is not instrumented.
   // CHECK-LABEL: tt.func private @scratch_only_callee
   // CHECK-NOT: tt.call @__triton_consan
-  // CHECK: tt.gather
+  // CHECK: ttg.convert_layout
   tt.func private @scratch_only_callee(
       %indices: tensor<1024x256xi32, #call_blocked>,
       %values: tensor<128x256xf32, #call_blocked>) {
-    %0 = tt.gather %values[%indices] {axis = 0 : i32, allocation.offset = 0 : i32, allocation.size = 512 : i32}
-        : (tensor<128x256xf32, #call_blocked>, tensor<1024x256xi32, #call_blocked>) -> tensor<1024x256xf32, #call_blocked>
+    %0 = ttg.convert_layout %values {allocation.offset = 0 : i32, allocation.size = 512 : i32}
+        : tensor<128x256xf32, #call_blocked> -> tensor<128x256xf32, #call_dst>
     tt.return
   }
 
