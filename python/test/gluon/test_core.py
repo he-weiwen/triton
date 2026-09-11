@@ -3983,6 +3983,38 @@ def test_shared_gather(N, M):
     torch.testing.assert_close(output, expected)
 
 
+@pytest.mark.parametrize("dtype, gather_pointers", [(torch.int32, False), (torch.bool, False), (torch.int32, True)])
+def test_gather_shared_types(dtype, gather_pointers, device):
+    @gluon.jit
+    def kernel(Src, Idx0, Idx1, Out0, Out1, BLOCK: ttgl.constexpr, layout: ttgl.constexpr, POINTERS: ttgl.constexpr):
+        offsets = ttgl.arange(0, BLOCK, layout=layout)
+        src = Src + offsets
+        if not POINTERS:
+            src = ttgl.load(src)
+        idx0 = ttgl.load(Idx0 + offsets)
+        idx1 = ttgl.load(Idx1 + offsets)
+        first = ttgl.gather(src, idx0, axis=0)
+        second = ttgl.gather(src, idx1, axis=0)
+        if POINTERS:
+            first = ttgl.load(first)
+            second = ttgl.load(second)
+        ttgl.store(Out0 + offsets, first)
+        ttgl.store(Out1 + offsets, second)
+
+    block = THREADS_PER_WARP * 4
+    layout = ttgl.BlockedLayout([1], [THREADS_PER_WARP], [4], [0])
+    values = torch.arange(block, device=device, dtype=torch.int32)
+    if dtype == torch.bool:
+        values = values % 3 == 0
+    idx0 = (torch.arange(block, device=device, dtype=torch.int32) + block // 2) % block
+    idx1 = torch.arange(block - 1, -1, -1, device=device, dtype=torch.int32)
+    out0 = torch.empty_like(values)
+    out1 = torch.empty_like(values)
+    kernel[(1, )](values, idx0, idx1, out0, out1, block, layout, gather_pointers, num_warps=4)
+    torch.testing.assert_close(out0, values[idx0], rtol=0, atol=0)
+    torch.testing.assert_close(out1, values[idx1], rtol=0, atol=0)
+
+
 @gluon.jit
 def shared_gather_scatter_two_ctas_kernel(
     inp,

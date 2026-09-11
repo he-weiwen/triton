@@ -56,6 +56,27 @@ def test_compile_only_sort_keeps_comparisons_boolean() -> None:
     assert "arith.extui" not in compiled.asm["ttgir"]
 
 
+@pytest.mark.parametrize("target", [GPUTarget("cuda", 90, 32), GPUTarget("hip", "gfx950", 64)])
+def test_compile_only_gather_hoists_in_triton(target):
+
+    @triton.jit
+    def kernel(Src, Out, N, BLOCK: tl.constexpr):
+        offsets = tl.arange(0, BLOCK)
+        values = tl.load(Src + offsets)
+        for i in range(N):
+            indices = (offsets + i) % BLOCK
+            first = tl.gather(values, indices, axis=0)
+            second = tl.gather(values, (indices + 1) % BLOCK, axis=0)
+            tl.store(Out + i * BLOCK + offsets, first + second)
+
+    source = ASTSource(kernel, {"Src": "*i32", "Out": "*i32", "N": "i32", "BLOCK": "constexpr"}, {"BLOCK": 512})
+    compiled = triton.compile(source, target=target)
+    ttgir = compiled.asm["ttgir"]
+    assert ttgir.count("ttg.local_alloc") == 1
+    assert ttgir.index("ttg.local_alloc") < ttgir.index("scf.for")
+    assert ttgir.count("ttg.local_gather") == 2
+
+
 def test_compile_only_sm100() -> None:
 
     @triton.jit
