@@ -495,6 +495,18 @@ public:
   using BinaryOpVisitorImpl<OpTy>::BinaryOpVisitorImpl;
 
 private:
+  int64_t getConstancy(OpTy op, const AxisInfo &lhs, const AxisInfo &rhs,
+                       int dim) override {
+    auto constancy = BinaryOpVisitorImpl<OpTy>::getConstancy(op, lhs, rhs, dim);
+    if constexpr (std::is_same_v<OpTy, arith::SubIOp>) {
+      // Within the overlap of two contiguous groups, both operands advance
+      // by one, so their difference remains constant.
+      constancy = std::max(constancy,
+                           gcd(lhs.getContiguity(dim), rhs.getContiguity(dim)));
+    }
+    return constancy;
+  }
+
   int64_t getContiguity(OpTy op, const AxisInfo &lhs, const AxisInfo &rhs,
                         int dim) override {
     if (isa<arith::SubIOp>(op)) {
