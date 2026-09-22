@@ -1086,12 +1086,15 @@ public:
       contiguity.push_back(gcd(lhsInfo.getContiguity(d),
                                rhsInfo.getContiguity(d),
                                condInfo.getConstancy(d)));
-      // getDivisibilityFromContiguity does not see condConstancy; clamp
-      // by the just-computed output contiguity so the result remains
-      // sound when condConstancy reduces it below the input contiguities.
-      divisibility.push_back(
-          gcd(getDivisibilityFromContiguity(lhsInfo, rhsInfo, d),
-              contiguity.back()));
+      auto resultDivisibility =
+          getDivisibilityFromContiguity(lhsInfo, rhsInfo, d);
+      // getDivisibilityFromContiguity does not see condConstancy. Clamp when
+      // the condition splits an input contiguity group, because new result
+      // group bases can then fall at offsets within that input group.
+      if (contiguity.back() < lhsInfo.getContiguity(d) ||
+          contiguity.back() < rhsInfo.getContiguity(d))
+        resultDivisibility = gcd(resultDivisibility, contiguity.back());
+      divisibility.push_back(resultDivisibility);
     }
 
     return AxisInfo(contiguity, divisibility, constancy);

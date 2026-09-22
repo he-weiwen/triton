@@ -1501,6 +1501,19 @@ tt.func @select_cond_constancy_clamps_divisibility(%arg0: tensor<8xi1>) {
 
 // -----
 
+tt.func @select_preserves_divisibility(%arg0: tensor<8xi1>) {
+  %eight = arith.constant dense<8> : tensor<8xi32>
+  %sixteen = arith.constant dense<16> : tensor<8xi32>
+  // Selecting between individually aligned elements does not create new
+  // bases inside a contiguous group, because both inputs have unit
+  // contiguity.
+  // expected-remark @below {{contiguity = [1], divisibility = [8]}}
+  %sel = arith.select %arg0, %eight, %sixteen : tensor<8xi1>, tensor<8xi32>
+  tt.return
+}
+
+// -----
+
 tt.func @cmp_after_max_constancy() {
   %c5 = arith.constant dense<5> : tensor<4xi32>
   %c7 = arith.constant dense<7> : tensor<4xi32>
