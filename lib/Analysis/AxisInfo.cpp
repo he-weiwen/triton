@@ -579,8 +579,12 @@ private:
       // accordingly (otherwise we can overestimate alignment).
       if (lhs.getContiguity(dim) > 1 || rhs.getContiguity(dim) > 1) {
         auto resContiguity = getContiguity(op, lhs, rhs, dim);
-        return gcd(lhsDivisibility, rhsDivisibility,
-                   multiplyDivisor(resContiguity, elemSize));
+        auto divisibility = gcd(lhsDivisibility, rhsDivisibility);
+        if (resContiguity < lhs.getContiguity(dim) ||
+            resContiguity < rhs.getContiguity(dim))
+          divisibility =
+              gcd(divisibility, multiplyDivisor(resContiguity, elemSize));
+        return divisibility;
       } else {
         return gcd(lhsDivisibility, rhsDivisibility);
       }

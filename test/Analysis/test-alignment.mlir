@@ -259,6 +259,32 @@ tt.func @add(%arg0: tensor<128xi32> {tt.contiguity = 1 : i32, tt.divisibility = 
 
 // -----
 
+tt.func @add_sub_preserve_divisibility() {
+  // Both operations preserve the range's contiguity group, so its base
+  // divisibility does not need to be clamped to the group size.
+  %range = tt.make_range {end = 20 : i32, start = 16 : i32} : tensor<4xi32>
+  %sixteen = arith.constant dense<16> : tensor<4xi32>
+  // expected-remark @below {{contiguity = [4], divisibility = [16]}}
+  %sum = arith.addi %range, %sixteen : tensor<4xi32>
+  // expected-remark @below {{contiguity = [4], divisibility = [16]}}
+  %difference = arith.subi %range, %sixteen : tensor<4xi32>
+  tt.return
+}
+
+// -----
+
+tt.func @addptr_preserves_divisibility(%arg0: !tt.ptr<i32> {tt.divisibility = 64 : i32}) {
+  %base = tt.splat %arg0 : !tt.ptr<i32> -> tensor<4x!tt.ptr<i32>>
+  %offset = tt.make_range {end = 20 : i32, start = 16 : i32} : tensor<4xi32>
+  // The offset starts 64 bytes from an aligned pointer and the output keeps
+  // the complete offset contiguity group.
+  // expected-remark @below {{contiguity = [4], divisibility = [64]}}
+  %ptrs = tt.addptr %base, %offset : tensor<4x!tt.ptr<i32>>, tensor<4xi32>
+  tt.return
+}
+
+// -----
+
 tt.func @addptr(%arg0: !tt.ptr<i1> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<i8> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<i16> {tt.divisibility = 16 : i32}, %arg3: !tt.ptr<i32> {tt.divisibility = 16 : i32}, %arg4: !tt.ptr<i64> {tt.divisibility = 16 : i32}) {
   // expected-remark @below {{contiguity = [1], divisibility = [1], constancy = [1], constant_value = 1}}
   %cst1 = arith.constant 1 : i32
