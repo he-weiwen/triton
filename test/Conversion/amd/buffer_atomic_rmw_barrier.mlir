@@ -6,7 +6,7 @@
 #blocked1 = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [2, 2], order = [1, 0]}>
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
   // CHECK-LABEL: @buffer_atomic_rmw
-  // CHECK-COUNT-3: rocdl.s.barrier
+  // CHECK-COUNT-1: rocdl.s.barrier
   // CHECK: llvm.load {{.*}} : !llvm.ptr<3> -> vector<1xi64>
   // CHECK: rocdl.s.barrier
   // CHECK-NOT: rocdl.s.barrier

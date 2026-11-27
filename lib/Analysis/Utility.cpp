@@ -182,6 +182,7 @@ LayoutConversionScratchConfig getLayoutConversionScratchConfig(
 
 unsigned ReduceOpHelper::getScratchSizeInBytes(
     GetNumScratchElemsFn numScratchElemsGetter) {
+  auto kReg = StringAttr::get(op.getContext(), "register");
   auto kLane = StringAttr::get(op.getContext(), "lane");
   auto regLl = reducedRegLaneLayout(srcTy, axis);
   auto kAxis = *(regLl.getOutDimNames().begin() + axis);
@@ -193,7 +194,9 @@ unsigned ReduceOpHelper::getScratchSizeInBytes(
     auto config = getLayoutConversionScratchConfig(
         regLl, tmpLl, op.getElementTypes(), numScratchElemsGetter);
     bytes = std::max(bytes, config.sizeInBytes);
-    regLl = zeroBasesAlongDimAndReorder(tmpLl, axis, kLane);
+    regLl = zeroBasesAlongDimAndReorder(tmpLl, axis, kReg)
+                .removeZeroBasesAlongDim(kReg);
+    regLl = zeroBasesAlongDimAndReorder(regLl, axis, kLane);
   }
   return bytes;
 }
@@ -290,6 +293,33 @@ ReduceOpHelper::getInterWarpReductionLayout(const LinearLayout &layout,
   // reduction with just one convert_layout
   if (llvm::popcount(zeroLaneBases) >= totalAxisBases)
     return swapAxisBasesIntoLanes(zeroLaneBases, /*includeBlock=*/true);
+
+  // Otherwise, fill the zero lane bases and append the remaining axis bases to
+  // the register bases. This does not displace any basis of another dimension,
+  // so the reduced values are already in the output layout. Each appended
+  // basis doubles the values a thread loads, so only do it for a small
+  // overflow.
+  // For example, reducing dim0 with bases written as [dim0, dim1]:
+  //   reg  = [[0,1], [0,2]]
+  //   lane = [[0,4], [0,8], [0,16], [0,32], [0,0]]
+  //   warp = [[1,0], [2,0]]
+  // becomes
+  //   reg  = [[0,1], [0,2], [2,0]]
+  //   lane = [[0,4], [0,8], [0,16], [0,32], [1,0]]
+  //   warp = [[0,0], [0,0]]
+  unsigned overflow = totalAxisBases - llvm::popcount(zeroLaneBases);
+  if (overflow <= 2) {
+    auto filled = swapAxisBasesIntoLanes(zeroLaneBases, /*includeBlock=*/true);
+    auto newBases = filled.getBases();
+    auto &regBases = newBases[mlir::StringAttr::get(ctx, "register")];
+    for (auto dim : {kWarp, kBlock})
+      for (auto &basis : newBases[dim])
+        if (basis[axis] != 0) {
+          regBases.push_back(basis);
+          llvm::fill(basis, 0);
+        }
+    return LinearLayout(std::move(newBases), outDims);
+  }
 
   // If we can fit all the bases inside the lane dimension, we can perform the
   // reduction with two convert_layouts

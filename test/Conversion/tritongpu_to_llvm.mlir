@@ -2833,6 +2833,100 @@ module attributes {"ttg.target" = "cuda:80", "ttg.num-ctas" = 1 : i32, "ttg.num-
 
 // -----
 
+// The two warp axis bases do not fit in zero lane bases, so they are appended
+// to the register bases: one conversion, four copies per thread, no shuffles.
+// CHECK-LABEL: reduce_across_warps_single_roundtrip
+//   CHECK-NOT:   nvvm.shfl.sync
+//       CHECK:   nvvm.barrier
+// CHECK-COUNT-4: llvm.load {{.*}} !llvm.ptr<3> -> vector<4xi32>
+//   CHECK-NOT:   nvvm.barrier
+//   CHECK-NOT:   nvvm.shfl.sync
+//       CHECK:   llvm.return
+#blocked = #ttg.blocked<{sizePerThread = [1, 4], threadsPerWarp = [1, 32], warpsPerCTA = [4, 1], order = [1, 0]}>
+module attributes {"ttg.target" = "cuda:80", "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  tt.func private @reduce_across_warps_single_roundtrip(%arg0: tensor<4x128xi32, #blocked>) -> tensor<128xi32, #ttg.slice<{dim = 0, parent = #blocked}>> {
+    %0 = "tt.reduce"(%arg0) <{axis = 0 : i32}> ({
+    ^bb0(%a: i32, %b: i32):
+      %c = arith.addi %a, %b : i32
+      tt.reduce.return %c : i32
+    }) : (tensor<4x128xi32, #blocked>) -> tensor<128xi32, #ttg.slice<{dim = 0, parent = #blocked}>>
+    tt.return %0 : tensor<128xi32, #ttg.slice<{dim = 0, parent = #blocked}>>
+  }
+}
+
+// -----
+
+// One warp axis basis goes into the lane basis that reducing within warps
+// left zero and is shuffled; the other is appended to the register bases.
+// CHECK-LABEL: reduce_across_warps_fill_zero_lane
+// CHECK-COUNT-4: nvvm.shfl.sync
+//       CHECK:   nvvm.barrier
+// CHECK-COUNT-2: llvm.load {{.*}} !llvm.ptr<3> -> vector<4xi32>
+//   CHECK-NOT:   nvvm.barrier
+// CHECK-COUNT-4: nvvm.shfl.sync
+//   CHECK-NOT:   nvvm.barrier
+//   CHECK-NOT:   nvvm.shfl.sync
+//       CHECK:   llvm.return
+#blocked = #ttg.blocked<{sizePerThread = [1, 4], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>
+module attributes {"ttg.target" = "cuda:80", "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  tt.func private @reduce_across_warps_fill_zero_lane(%arg0: tensor<8x64xi32, #blocked>) -> tensor<64xi32, #ttg.slice<{dim = 0, parent = #blocked}>> {
+    %0 = "tt.reduce"(%arg0) <{axis = 0 : i32}> ({
+    ^bb0(%a: i32, %b: i32):
+      %c = arith.addi %a, %b : i32
+      tt.reduce.return %c : i32
+    }) : (tensor<8x64xi32, #blocked>) -> tensor<64xi32, #ttg.slice<{dim = 0, parent = #blocked}>>
+    tt.return %0 : tensor<64xi32, #ttg.slice<{dim = 0, parent = #blocked}>>
+  }
+}
+
+// -----
+
+// Three warp axis bases are more than we append: swap them into the lanes,
+// shuffle, and convert back.
+// CHECK-LABEL: reduce_across_warps_two_roundtrips
+//       CHECK:   nvvm.barrier
+//       CHECK:   nvvm.shfl.sync
+//       CHECK:   nvvm.barrier
+//       CHECK:   nvvm.barrier
+//       CHECK:   llvm.return
+#blocked = #ttg.blocked<{sizePerThread = [1, 4], threadsPerWarp = [1, 32], warpsPerCTA = [8, 1], order = [1, 0]}>
+module attributes {"ttg.target" = "cuda:80", "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  tt.func private @reduce_across_warps_two_roundtrips(%arg0: tensor<8x128xi32, #blocked>) -> tensor<128xi32, #ttg.slice<{dim = 0, parent = #blocked}>> {
+    %0 = "tt.reduce"(%arg0) <{axis = 0 : i32}> ({
+    ^bb0(%a: i32, %b: i32):
+      %c = arith.addi %a, %b : i32
+      tt.reduce.return %c : i32
+    }) : (tensor<8x128xi32, #blocked>) -> tensor<128xi32, #ttg.slice<{dim = 0, parent = #blocked}>>
+    tt.return %0 : tensor<128xi32, #ttg.slice<{dim = 0, parent = #blocked}>>
+  }
+}
+
+// -----
+
+// A warp and a block axis basis are appended alike; the copies of the other
+// CTA are read through the cluster.
+// CHECK-LABEL: reduce_across_ctas_single_roundtrip
+//   CHECK-NOT:   nvvm.shfl.sync
+//       CHECK:   nvvm.cluster.arrive
+//       CHECK:   nvvm.cluster.wait
+// CHECK-COUNT-4: llvm.load {{.*}} !llvm.ptr<7> -> vector<4xi32>
+//   CHECK-NOT:   llvm.load {{.*}} !llvm.ptr<7>
+//   CHECK-NOT:   nvvm.shfl.sync
+//       CHECK:   llvm.return
+#blocked = #ttg.blocked<{sizePerThread = [1, 4], threadsPerWarp = [1, 32], warpsPerCTA = [2, 1], order = [1, 0], CGALayout = [[1, 0]]}>
+module attributes {"ttg.target" = "cuda:90", "ttg.num-ctas" = 2 : i32, "ttg.num-warps" = 2 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  tt.func private @reduce_across_ctas_single_roundtrip(%arg0: tensor<4x128xi32, #blocked>) -> tensor<128xi32, #ttg.slice<{dim = 0, parent = #blocked}>> {
+    %0 = "tt.reduce"(%arg0) <{axis = 0 : i32}> ({
+    ^bb0(%a: i32, %b: i32):
+      %c = arith.addi %a, %b : i32
+      tt.reduce.return %c : i32
+    }) : (tensor<4x128xi32, #blocked>) -> tensor<128xi32, #ttg.slice<{dim = 0, parent = #blocked}>>
+    tt.return %0 : tensor<128xi32, #ttg.slice<{dim = 0, parent = #blocked}>>
+  }
+}
+
+// -----
+
 // CHECK-LABEL: sum_reduction_commuted
 //       CHECK:  %[[M:.+]] = llvm.mlir.constant(-1 : i32) : i32
 //       CHECK:   nvvm.redux.sync  add %{{.*}}, %[[M]]

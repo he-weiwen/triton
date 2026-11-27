@@ -994,7 +994,7 @@ def _funky_reduce_layouts():
             block_bases=[[64, 0]],
             shape=[128, 4],
         ),
-        # Funky layout with two convert_layouts with block_bases
+        # Funky layout with block bases that do not fit in the lane bases
         ttgl.DistributedLinearLayout(
             reg_bases=[],
             lane_bases=[[0, 1], [0, 4], [0, 2], [1, 0], [0, 0]] + ([[0, 0]] * (ilog2(THREADS_PER_WARP) - 5)),

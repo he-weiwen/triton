@@ -81,7 +81,9 @@ public:
       lastCvtCrossesCTAs = !mlir::isCvtDimSync(regLl, tmpLl, kBlock);
 
       std::tie(regLl, accs) =
-          reduceWithinWarps(op, std::move(tmpLl), std::move(accs), rewriter);
+          reduceWithinThreads(op, std::move(tmpLl), std::move(accs), rewriter);
+      std::tie(regLl, accs) =
+          reduceWithinWarps(op, std::move(regLl), std::move(accs), rewriter);
       ++i;
     }
     assert(i <= 2 && "expected at most 2 rounds of warp reductions");
